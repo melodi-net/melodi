@@ -5,7 +5,7 @@ BUILD_DIR ?= ../../build/fuzz
 TARGET := $(BUILD_DIR)/parsers
 CORPUS := $(BUILD_DIR)/corpus
 SEED := $(CORPUS)/zero-512
-SOURCES := parsers.c ../../src/proto/genl.c ../../src/proto/meshtastic.c ../../src/proto/wire.c
+SOURCES := parsers.c ../../src/proto/genl.c ../../src/proto/radio.c ../../src/proto/wire.c
 CFLAGS := -O1 -g -std=c11 -Wall -Wextra -Werror -pedantic
 CFLAGS += -fno-omit-frame-pointer -fsanitize=fuzzer,address,undefined
 CPPFLAGS := -I../../src/proto

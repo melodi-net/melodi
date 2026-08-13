@@ -10,7 +10,7 @@
 #include <linux/workqueue.h>
 
 #include "contract.h"
-#include "meshtastic.h"
+#include "radio.h"
 
 #define MELODI_EMULATOR_RX_LIMIT 32
 #define MELODI_EMULATOR_TX_LIMIT 32
@@ -49,8 +49,8 @@ struct melodi_emulator {
     unsigned int queued;
     atomic_t transmit_count;
     atomic_t packet_id;
-    struct melodi_mesh_stream stream;
-    u32 node_number;
+    struct melodi_radio_stream stream;
+    u32 locator;
     bool enabled;
 };
 
@@ -60,11 +60,13 @@ static bool firmware_refusal;
 static bool unsafe_configuration;
 static bool pause_handshake;
 static bool malformed_protobuf;
+static unsigned int dribble;
 module_param(near_miss, bool, 0444);
 module_param(firmware_refusal, bool, 0444);
 module_param(unsafe_configuration, bool, 0444);
 module_param(pause_handshake, bool, 0444);
 module_param(malformed_protobuf, bool, 0444);
+module_param(dribble, uint, 0444);
 
 static const char *const melodi_emulator_driver_names[] = {
     "melodi_usb_emulator_1",
@@ -136,47 +138,6 @@ static const struct usb_configuration melodi_emulator_configuration = {
     .MaxPower = 2,
 };
 
-static const u8 melodi_emulator_metadata[] = {
-    0x6a, 0x17, 0x0a, 0x11, 'm', 'e', 'l', 'o', 'd', 'i', '-', 'u',
-    's', 'b', '-', 't', 'e', 's', 't', '-', '1', 0x10, 0x01, 0x48, 0x01,
-};
-
-static const u8 melodi_emulator_bad_metadata[] = {
-    0x6a, 0x17, 0x0a, 0x11, 'u', 'n', 's', 'u', 'p', 'p', 'o', 'r',
-    't', 'e', 'd', '-', 'r', 'a', 'd', 'i', 'o', 0x10, 0x01, 0x48, 0x01,
-};
-
-static const u8 melodi_emulator_channel[] = {
-    0x52, 0x04, 0x12, 0x00, 0x18, 0x01,
-};
-
-static const u8 melodi_emulator_lora[] = {
-    0x2a, 0x11, 0x32, 0x0f, 0x08, 0x01, 0x10, 0x03, 0x38, 0x03,
-    0x40, 0x03, 0x48, 0x01, 0x58, 0x07, 0xc0, 0x06, 0x01,
-};
-
-static const u8 melodi_emulator_unsafe_lora[] = {
-    0x2a, 0x13, 0x32, 0x11, 0x08, 0x01, 0x10, 0x03, 0x38, 0x03,
-    0x40, 0x03, 0x48, 0x01, 0x58, 0x07, 0x60, 0x01, 0xc0, 0x06, 0x01,
-};
-
-static const u8 melodi_emulator_mqtt[] = {
-    0x4a, 0x02, 0x0a, 0x00,
-};
-
-static const u8 melodi_emulator_config_complete[] = {
-    0x38, 0xac, 0x9e, 0x04,
-};
-
-static const u8 melodi_emulator_nodes_complete[] = {
-    0x38, 0xad, 0x9e, 0x04,
-};
-
-static const u8 melodi_emulator_queue_status[] = {
-    0x5a, 0x04, 0x10, 0x08, 0x18, 0x08,
-};
-
-static const u8 melodi_emulator_malformed[] = { 0x80 };
 
 static void melodi_emulator_transmit_complete(struct usb_ep *endpoint,
                                               struct usb_request *request)
@@ -187,59 +148,47 @@ static void melodi_emulator_transmit_complete(struct usb_ep *endpoint,
     usb_ep_free_request(endpoint, request);
     atomic_dec(&emulator->transmit_count);
 }
-
-static int melodi_emulator_queue_records(struct melodi_emulator *emulator,
-                                         const void *const *messages,
-                                         const size_t *lengths, size_t count)
+static int melodi_emulator_queue_bytes(struct melodi_emulator *emulator,
+                                       const u8 *data, size_t length)
 {
     struct usb_request *request;
-    size_t total = 0;
-    size_t framed_length;
+    size_t chunk = dribble ? dribble : length;
     size_t offset = 0;
-    size_t index;
     int error;
 
-    if (!READ_ONCE(emulator->enabled) || !messages || !lengths || !count)
+    if (!READ_ONCE(emulator->enabled) || !data || !length)
         return -ENETDOWN;
-    for (index = 0; index < count; index++) {
-        if (!messages[index] || !lengths[index] ||
-            lengths[index] > MELODI_MESH_STREAM_MAX ||
-            lengths[index] > MELODI_EMULATOR_BUFFER - 4 ||
-            total > MELODI_EMULATOR_BUFFER - (lengths[index] + 4))
-            return -EMSGSIZE;
-        total += lengths[index] + 4;
+    if (length > MELODI_EMULATOR_BUFFER)
+        return -EMSGSIZE;
+    while (offset < length) {
+        size_t part = min(chunk, length - offset);
+
+        if (atomic_inc_return(&emulator->transmit_count) >
+            MELODI_EMULATOR_TX_LIMIT) {
+            atomic_dec(&emulator->transmit_count);
+            return -ENOSPC;
+        }
+        request = usb_ep_alloc_request(emulator->in_endpoint, GFP_KERNEL);
+        if (!request) {
+            error = -ENOMEM;
+            goto decrement;
+        }
+        request->buf = kmemdup(data + offset, part, GFP_KERNEL);
+        if (!request->buf) {
+            error = -ENOMEM;
+            goto free_request;
+        }
+        request->length = part;
+        request->complete = melodi_emulator_transmit_complete;
+        request->context = emulator;
+        error = usb_ep_queue(emulator->in_endpoint, request, GFP_KERNEL);
+        if (error) {
+            kfree(request->buf);
+            goto free_request;
+        }
+        offset += part;
     }
-    if (atomic_inc_return(&emulator->transmit_count) >
-        MELODI_EMULATOR_TX_LIMIT) {
-        atomic_dec(&emulator->transmit_count);
-        return -ENOSPC;
-    }
-    request = usb_ep_alloc_request(emulator->in_endpoint, GFP_KERNEL);
-    if (!request) {
-        error = -ENOMEM;
-        goto decrement;
-    }
-    request->buf = kmalloc(total, GFP_KERNEL);
-    if (!request->buf) {
-        error = -ENOMEM;
-        goto free_request;
-    }
-    for (index = 0; index < count; index++) {
-        error = melodi_mesh_stream_encode(
-            messages[index], lengths[index], (u8 *)request->buf + offset,
-            total - offset, &framed_length);
-        if (error)
-            goto free_buffer;
-        offset += framed_length;
-    }
-    request->length = offset;
-    request->complete = melodi_emulator_transmit_complete;
-    request->context = emulator;
-    error = usb_ep_queue(emulator->in_endpoint, request, GFP_KERNEL);
-    if (!error)
-        return 0;
-free_buffer:
-    kfree(request->buf);
+    return 0;
 free_request:
     usb_ep_free_request(emulator->in_endpoint, request);
 decrement:
@@ -247,139 +196,165 @@ decrement:
     return error;
 }
 
-static int melodi_emulator_queue_message(struct melodi_emulator *emulator,
-                                         const void *message, size_t length)
+static int melodi_emulator_send_info(struct melodi_emulator *emulator)
 {
-    const void *messages[] = { message };
-    const size_t lengths[] = { length };
-
-    return melodi_emulator_queue_records(emulator, messages, lengths,
-                                         ARRAY_SIZE(messages));
-}
-
-static int melodi_emulator_send_configuration(
-    struct melodi_emulator *emulator)
-{
-    u8 my_info[16];
-    size_t my_info_length;
-    const void *messages[] = {
-        my_info,
-        firmware_refusal ? melodi_emulator_bad_metadata :
-                           melodi_emulator_metadata,
-        melodi_emulator_channel,
-        unsafe_configuration ? melodi_emulator_unsafe_lora :
-                               melodi_emulator_lora,
-        melodi_emulator_mqtt,
-        melodi_emulator_config_complete,
-    };
-    size_t lengths[] = {
-        0,
-        firmware_refusal ? sizeof(melodi_emulator_bad_metadata) :
-                           sizeof(melodi_emulator_metadata),
-        sizeof(melodi_emulator_channel),
-        unsafe_configuration ? sizeof(melodi_emulator_unsafe_lora) :
-                               sizeof(melodi_emulator_lora),
-        sizeof(melodi_emulator_mqtt),
-        sizeof(melodi_emulator_config_complete),
-    };
-    size_t count = ARRAY_SIZE(messages) - pause_handshake;
-    int error;
-
-    if (malformed_protobuf)
-        return melodi_emulator_queue_message(
-            emulator, melodi_emulator_malformed,
-            sizeof(melodi_emulator_malformed));
-    error = melodi_mesh_encode_my_info(
-        READ_ONCE(emulator->node_number), my_info, sizeof(my_info),
-        &my_info_length);
-    if (error)
-        return error;
-    lengths[0] = my_info_length;
-    return melodi_emulator_queue_records(emulator, messages, lengths, count);
-}
-
-static int melodi_emulator_handle_command(
-    struct melodi_emulator *emulator,
-    const struct melodi_mesh_command *command)
-{
-    struct melodi_emulator *peer = emulator->peer;
-    struct melodi_mesh_packet packet;
-    u8 message[MELODI_MESH_STREAM_MAX];
-    u32 destination;
-    u32 source;
+    struct melodi_radio_info info = {};
+    u8 message[MELODI_EMULATOR_BUFFER];
     size_t length;
     int error;
 
-    if (command->type == MELODI_MESH_COMMAND_CONFIG_REQUEST) {
-        if (command->value == MELODI_MESH_CONFIG_NONCE)
-            return melodi_emulator_send_configuration(emulator);
-        if (command->value == MELODI_MESH_NODES_NONCE)
-            return melodi_emulator_queue_message(
-                emulator, melodi_emulator_nodes_complete,
-                sizeof(melodi_emulator_nodes_complete));
-        return -EPROTO;
-    }
-    if (command->type == MELODI_MESH_COMMAND_HEARTBEAT)
-        return melodi_emulator_queue_message(
-            emulator, melodi_emulator_queue_status,
-            sizeof(melodi_emulator_queue_status));
-    if (command->type == MELODI_MESH_COMMAND_DISCONNECT)
-        return 0;
-    if (command->type != MELODI_MESH_COMMAND_PACKET)
-        return -EOPNOTSUPP;
-    source = READ_ONCE(emulator->node_number);
-    destination = READ_ONCE(peer->node_number);
-    if (!source || !destination ||
-        (command->packet.to != destination &&
-         command->packet.to != MELODI_MESH_BROADCAST))
-        return -EHOSTUNREACH;
-    packet = command->packet;
-    packet.from = source;
-    packet.transport = 1;
-    error = melodi_mesh_encode_from_radio(&packet, message, sizeof(message),
-                                          &length);
-    if (!error)
-        error = melodi_emulator_queue_message(peer, message, length);
-    if (!error && command->packet.want_ack) {
-        u32 packet_id = atomic_inc_return(&peer->packet_id);
+    info.abi_version = MELODI_RADIO_VERSION;
+    info.packet_mtu = MELODI_RADIO_PACKET_MAX;
+    info.queue_depth = 8;
+    strscpy(info.firmware, firmware_refusal ? "unsupported" : "melodi-emu-1",
+            sizeof(info.firmware));
+    strscpy(info.hardware, "melodi-usb-emulator", sizeof(info.hardware));
+    error = melodi_radio_encode_info(&info, message, sizeof(message),
+                                     &length);
+    if (error)
+        return error;
+    if (malformed_protobuf)
+        message[MELODI_RADIO_HEADER_SIZE] ^= 0xff;
+    return melodi_emulator_queue_bytes(emulator, message, length);
+}
 
-        if (!packet_id)
-            packet_id = atomic_inc_return(&peer->packet_id);
-        error = melodi_mesh_encode_routing_response(
-            destination, source, packet_id,
-            command->packet.id, 0, message, sizeof(message), &length);
-        if (!error)
-            error = melodi_emulator_queue_message(emulator, message, length);
+static int melodi_emulator_send_status(struct melodi_emulator *emulator)
+{
+    struct melodi_radio_status status = {};
+    u8 message[MELODI_EMULATOR_BUFFER];
+    size_t length;
+    int error;
+
+    status.locator = READ_ONCE(emulator->locator);
+    status.queue_depth = 8;
+    status.queue_free = 8;
+    if (unsafe_configuration) {
+        status.state = MELODI_RADIO_STATE_FAILED;
+        status.fault = MELODI_RADIO_FAULT_MODEM;
+    } else if (status.locator) {
+        status.state = MELODI_RADIO_STATE_READY;
+    } else {
+        status.state = MELODI_RADIO_STATE_IDLE;
     }
-    return error;
+    error = melodi_radio_encode_status(&status, message, sizeof(message),
+                                       &length);
+    if (error)
+        return error;
+    return melodi_emulator_queue_bytes(emulator, message, length);
+}
+
+static int melodi_emulator_send_result(struct melodi_emulator *emulator,
+                                       u32 cookie, u8 result)
+{
+    struct melodi_radio_result_report report = {};
+    u8 message[MELODI_EMULATOR_BUFFER];
+    size_t length;
+    int error;
+
+    report.cookie = cookie;
+    report.duration_us = 1000;
+    report.result = result;
+    error = melodi_radio_encode_result(&report, message, sizeof(message),
+                                       &length);
+    if (error)
+        return error;
+    return melodi_emulator_queue_bytes(emulator, message, length);
+}
+
+static int melodi_emulator_forward(struct melodi_emulator *emulator,
+                                   const struct melodi_radio_transmit *request)
+{
+    struct melodi_emulator *peer = emulator->peer;
+    struct melodi_radio_receive receive = {};
+    u8 message[MELODI_EMULATOR_BUFFER];
+    size_t length;
+    u32 source = READ_ONCE(emulator->locator);
+    u32 destination = READ_ONCE(peer->locator);
+    int error;
+
+    if (!source || !destination)
+        return -EHOSTUNREACH;
+    if (request->destination != destination &&
+        request->destination != MELODI_RADIO_LOCATOR_BROADCAST)
+        return 0;
+    receive.source = source;
+    receive.destination = request->destination;
+    receive.rssi = -90;
+    receive.snr = 8;
+    receive.payload = request->payload;
+    receive.payload_length = request->payload_length;
+    error = melodi_radio_encode_receive(&receive, message, sizeof(message),
+                                        &length);
+    if (error)
+        return error;
+    return melodi_emulator_queue_bytes(peer, message, length);
+}
+
+static int melodi_emulator_handle_message(
+    struct melodi_emulator *emulator,
+    const struct melodi_radio_header *header, const u8 *payload)
+{
+    struct melodi_radio_configure config;
+    struct melodi_radio_transmit request;
+    int error;
+
+    switch (header->type) {
+    case MELODI_RADIO_T_IDENTIFY:
+        return melodi_emulator_send_info(emulator);
+    case MELODI_RADIO_T_CONFIGURE:
+        error = melodi_radio_decode_configure(payload, header->length,
+                                              &config);
+        if (error)
+            return error;
+        WRITE_ONCE(emulator->locator, config.locator);
+        if (pause_handshake)
+            return 0;
+        return melodi_emulator_send_status(emulator);
+    case MELODI_RADIO_T_TRANSMIT:
+        error = melodi_radio_decode_transmit(payload, header->length,
+                                             &request);
+        if (error)
+            return error;
+        if (!READ_ONCE(emulator->locator))
+            return melodi_emulator_send_result(
+                emulator, request.cookie, MELODI_RADIO_RESULT_NOT_READY);
+        error = melodi_emulator_forward(emulator, &request);
+        if (error)
+            return error;
+        return melodi_emulator_send_result(emulator, request.cookie,
+                                           MELODI_RADIO_RESULT_SENT);
+    case MELODI_RADIO_T_RESET:
+        WRITE_ONCE(emulator->locator, 0);
+        return melodi_emulator_send_status(emulator);
+    default:
+        return -EOPNOTSUPP;
+    }
 }
 
 static void melodi_emulator_parse(struct melodi_emulator *emulator,
                                   const struct melodi_emulator_chunk *chunk)
 {
-    struct melodi_mesh_command command;
-    const u8 *message;
-    size_t length;
+    const struct melodi_radio_header *header;
+    const u8 *payload;
     unsigned int index;
     int result;
 
     for (index = 0; index < chunk->length; index++) {
-        result = melodi_mesh_stream_feed(&emulator->stream,
-                                         chunk->data[index], &message,
-                                         &length);
+        result = melodi_radio_stream_feed(&emulator->stream,
+                                          chunk->data[index], &header,
+                                          &payload);
         if (result < 0) {
             pr_err_ratelimited("melodi emulator stream: %d\n", result);
             continue;
         }
         if (!result)
             continue;
-        result = melodi_mesh_decode_to_radio(message, length, &command);
-        if (!result)
-            result = melodi_emulator_handle_command(emulator, &command);
+        result = melodi_emulator_handle_message(emulator, header, payload);
         if (result)
-            pr_err_ratelimited("melodi emulator command: %d\n", result);
+            pr_err_ratelimited("melodi emulator message: %d\n", result);
     }
 }
+
 
 static void melodi_emulator_work(struct work_struct *work)
 {
@@ -471,7 +446,7 @@ static void melodi_emulator_disable(struct usb_function *function)
     }
     flush_workqueue(emulator->workqueue);
     melodi_emulator_queue_clear(emulator);
-    melodi_mesh_stream_init(&emulator->stream);
+    melodi_radio_stream_init(&emulator->stream);
 }
 
 static int melodi_emulator_set_alt(struct usb_function *function,
@@ -654,13 +629,13 @@ static void melodi_emulator_initialize(struct melodi_emulator *emulator,
     emulator->string_table.strings = emulator->strings;
     emulator->device_strings[0] = &emulator->string_table;
     emulator->configuration = melodi_emulator_configuration;
-    emulator->node_number = 42 + index;
+    emulator->locator = 0;
     spin_lock_init(&emulator->lock);
     INIT_LIST_HEAD(&emulator->queue);
     INIT_WORK(&emulator->work, melodi_emulator_work);
     atomic_set(&emulator->transmit_count, 0);
     atomic_set(&emulator->packet_id, 1);
-    melodi_mesh_stream_init(&emulator->stream);
+    melodi_radio_stream_init(&emulator->stream);
     emulator->function.name = "melodi-radio";
     emulator->function.strings = emulator->device_strings;
     emulator->function.bind = melodi_emulator_function_bind;

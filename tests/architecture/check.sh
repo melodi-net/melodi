@@ -121,11 +121,6 @@ test "$mapping_definitions" -eq 1 || {
     exit 1
 }
 
-if grep -RInE 'MELODI_MESH_RADIO_CONFIG|MELODI_MESH_.*CAPABILIT|melodi_mesh_radio_config' \
-    src tests/unit tests/usb; then
-    printf '%s\n' 'custom Meshtastic readiness extension is forbidden' >&2
-    exit 1
-fi
 
 grep -q 'melodi_radio_stream_feed' src/kernel/usb/main.c || {
     printf '%s\n' 'the backend must decode the native radio protocol' >&2
@@ -146,7 +141,7 @@ if grep -RIn 'melodi_mesh_' src/kernel/usb/main.c; then
     exit 1
 fi
 
-if grep -niE 'meshtastic|protobuf|portnum|phoneapi|usb_(ep|descriptor)' \
+if grep -niE 'melodi_radio_|checksum|usb_(ep|descriptor)' \
     src/kernel/include/melodi/core.h; then
     printf '%s\n' 'backend-specific type leaked into the core ABI' >&2
     exit 1

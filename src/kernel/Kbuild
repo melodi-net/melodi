@@ -12,4 +12,4 @@ obj-m += melodi_usb.o
 melodi_usb-y := usb/main.o usb/contract.o usb/radio.o
 
 obj-m += melodi_usb_emulator.o
-melodi_usb_emulator-y := usb/emulator.o usb/emulator_meshtastic.o
+melodi_usb_emulator-y := usb/emulator.o usb/emulator_radio.o
