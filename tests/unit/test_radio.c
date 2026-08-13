@@ -257,8 +257,26 @@ static void test_segment(void)
                                        &length) == -EINVAL);
 }
 
+static void test_airtime(void)
+{
+    uint32_t fast = 0;
+    uint32_t slow = 0;
+    uint32_t small = 0;
+
+    assert(melodi_radio_airtime_estimate(7, 125, 5, 200, &fast) == 0);
+    assert(melodi_radio_airtime_estimate(12, 125, 5, 200, &slow) == 0);
+    assert(melodi_radio_airtime_estimate(7, 125, 5, 20, &small) == 0);
+    assert(slow > fast);
+    assert(fast > small);
+    assert(fast > 100000 && fast < 500000);
+    assert(melodi_radio_airtime_estimate(5, 125, 5, 20, &fast) == -EINVAL);
+    assert(melodi_radio_airtime_estimate(7, 0, 5, 20, &fast) == -EINVAL);
+    assert(melodi_radio_airtime_estimate(7, 125, 9, 20, &fast) == -EINVAL);
+}
+
 int main(void)
 {
+    test_airtime();
     test_stream_roundtrip();
     test_stream_resync();
     test_stream_checksum();

@@ -207,6 +207,12 @@ int melodi_radio_decode_receive(const void *input, size_t length,
 int melodi_radio_decode_result(const void *input, size_t length,
                                struct melodi_radio_result_report *report);
 
+int melodi_radio_airtime_estimate(melodi_radio_u8 spreading_factor,
+                                  melodi_radio_u16 bandwidth_khz,
+                                  melodi_radio_u8 coding_rate,
+                                  size_t payload_length,
+                                  melodi_radio_u32 *duration_us);
+
 int melodi_radio_segment_encode(const struct melodi_radio_segment *segment,
                                 void *output, size_t capacity,
                                 size_t *encoded_length);

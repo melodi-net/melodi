@@ -458,6 +458,51 @@ int melodi_radio_decode_result(const void *input, size_t length,
     return 0;
 }
 
+/**
+ * melodi_radio_airtime_estimate - Semtech LoRa time on air
+ * @spreading_factor: 6 to 12
+ * @bandwidth_khz: channel bandwidth in kilohertz
+ * @coding_rate: 5 to 8, the denominator of 4/N
+ * @payload_length: physical payload octets
+ * @duration_us: filled with the transmission duration in microseconds
+ *
+ * Assumes an eight symbol preamble, explicit header and enabled CRC.
+ */
+int melodi_radio_airtime_estimate(melodi_radio_u8 spreading_factor,
+                                  melodi_radio_u16 bandwidth_khz,
+                                  melodi_radio_u8 coding_rate,
+                                  size_t payload_length,
+                                  melodi_radio_u32 *duration_us)
+{
+    unsigned long long symbol_us;
+    unsigned long long preamble_us;
+    unsigned long long payload_us;
+    long long numerator;
+    long long denominator;
+    long long symbols;
+    unsigned int low_rate;
+
+    if (!duration_us || spreading_factor < 6 || spreading_factor > 12 ||
+        !bandwidth_khz || coding_rate < 5 || coding_rate > 8 ||
+        payload_length > MELODI_RADIO_PACKET_MAX)
+        return -EINVAL;
+    symbol_us = ((unsigned long long)1 << spreading_factor) * 1000ULL /
+                bandwidth_khz;
+    preamble_us = symbol_us * 49ULL / 4ULL;
+    low_rate = spreading_factor >= 11 && bandwidth_khz <= 125 ? 1 : 0;
+    numerator = 8LL * (long long)payload_length -
+                4LL * spreading_factor + 28LL + 16LL;
+    denominator = 4LL * (spreading_factor - 2LL * low_rate);
+    if (denominator <= 0)
+        return -EINVAL;
+    symbols = numerator <= 0 ? 0 :
+              (numerator + denominator - 1) / denominator;
+    symbols = 8 + symbols * (coding_rate - 4LL + 4LL);
+    payload_us = (unsigned long long)symbols * symbol_us;
+    *duration_us = (melodi_radio_u32)(preamble_us + payload_us);
+    return 0;
+}
+
 int melodi_radio_segment_encode(const struct melodi_radio_segment *segment,
                                 void *output, size_t capacity,
                                 size_t *encoded_length)
