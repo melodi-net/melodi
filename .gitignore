@@ -1,0 +1,10 @@
+/build/
+/.direnv/
+/src/kernel/.cache.mk
+/src/kernel/Module.symvers
+/src/kernel/modules.order
+/src/kernel/.*.cmd
+/src/kernel/*.ko
+/src/kernel/*.mod
+/src/kernel/*.mod.c
+/src/kernel/*.o

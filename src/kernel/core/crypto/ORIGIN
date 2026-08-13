@@ -1,0 +1,6 @@
+Monocypher 4.0.2
+https://monocypher.org/
+Archive SHA-256: 38d07179738c0c90677dba3ceb7a7b8496bcfea758ba1a53e803fed30ae0879c
+License choice: CC0-1.0
+Local changes: comments removed, kernel integer aliases added, and strict
+Ed25519 public-key subgroup validation exposed.

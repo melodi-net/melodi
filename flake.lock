@@ -34,23 +34,6 @@
         "type": "github"
       }
     },
-    "nanopb-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1733048516,
-        "narHash": "sha256-bMSZZaF8egAegi3enCM+DRyxOrPoWKAKybvWsrKZEDc=",
-        "owner": "nanopb",
-        "repo": "nanopb",
-        "rev": "cad3c18ef15a663e30e3e43e3a752b66378adec1",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nanopb",
-        "ref": "0.4.9.1",
-        "repo": "nanopb",
-        "type": "github"
-      }
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1775710090,
@@ -71,8 +54,25 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "meshtastic-protobufs": "meshtastic-protobufs",
-        "nanopb-src": "nanopb-src",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "sparse-src": "sparse-src"
+      }
+    },
+    "sparse-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1766043504,
+        "narHash": "sha256-662n1ENn8ZsiBtSBx6Vr1MrRAwzvob0Y1ifnBVtfB5k=",
+        "ref": "refs/heads/master",
+        "rev": "37156835e3d725b6d750f000be33ba3814bb2310",
+        "revCount": 4647,
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/devel/sparse/sparse.git"
+      },
+      "original": {
+        "rev": "37156835e3d725b6d750f000be33ba3814bb2310",
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/devel/sparse/sparse.git"
       }
     },
     "systems": {

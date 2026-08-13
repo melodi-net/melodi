@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-only
+ccflags-y += -I$(src)/../proto -I$(src)/include
+
+obj-m += melodi_core.o
+melodi_core-y := core/airtime.o core/main.o core/data.o core/discovery.o core/identity_crypto.o core/mapping.o core/netlink.o core/ordering.o core/policy.o core/queue.o core/reliability.o core/replay.o core/wire.o
+melodi_core-y += core/crypto/monocypher.o core/crypto/monocypher-ed25519.o
+
+obj-m += melodi_loop.o
+melodi_loop-y := loop/main.o
+
+obj-m += melodi_usb.o
+melodi_usb-y := usb/main.o usb/contract.o usb/meshtastic.o
+
+obj-m += melodi_usb_emulator.o
+melodi_usb_emulator-y := usb/emulator.o usb/emulator_meshtastic.o
