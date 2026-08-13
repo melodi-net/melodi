@@ -18,6 +18,10 @@ typedef uint32_t melodi_radio_u32;
 typedef int16_t melodi_radio_s16;
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define MELODI_RADIO_MAGIC0 0x4d
 #define MELODI_RADIO_MAGIC1 0x4c
 #define MELODI_RADIO_VERSION 1
@@ -218,5 +222,9 @@ int melodi_radio_segment_encode(const struct melodi_radio_segment *segment,
                                 size_t *encoded_length);
 int melodi_radio_segment_decode(const void *input, size_t length,
                                 struct melodi_radio_segment *segment);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
