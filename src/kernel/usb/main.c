@@ -23,7 +23,7 @@
 
 #include <melodi/core.h>
 #include "contract.h"
-#include "meshtastic.h"
+#include "radio.h"
 
 #define MELODI_USB_RX_URBS 4
 #define MELODI_USB_RX_SIZE 512
@@ -40,14 +40,21 @@
 #define MELODI_TTY_LIMIT 16
 #define MELODI_TTY_RECEIVE_ROOM 65536
 
-enum melodi_usb_handshake_action {
-    MELODI_USB_HANDSHAKE_IDLE,
-    MELODI_USB_HANDSHAKE_HEARTBEAT,
-    MELODI_USB_HANDSHAKE_NODES,
-};
-
 static bool allow_test_device;
 module_param(allow_test_device, bool, 0600);
+
+static unsigned int radio_frequency_hz = 868100000;
+static unsigned int radio_bandwidth_khz = 125;
+static unsigned int radio_spreading_factor = 9;
+static unsigned int radio_coding_rate = 5;
+static int radio_transmit_power_dbm = 14;
+static unsigned int radio_duty_permille = 100;
+module_param_named(frequency, radio_frequency_hz, uint, 0644);
+module_param_named(bandwidth, radio_bandwidth_khz, uint, 0644);
+module_param_named(spreading, radio_spreading_factor, uint, 0644);
+module_param_named(coding, radio_coding_rate, uint, 0644);
+module_param_named(power, radio_transmit_power_dbm, int, 0644);
+module_param_named(duty, radio_duty_permille, uint, 0644);
 
 struct melodi_usb_device;
 static struct usb_driver melodi_usb_driver;
@@ -93,9 +100,9 @@ struct melodi_usb_reassembly {
 };
 
 struct melodi_usb_encode_batch {
-    u8 segment[MELODI_MESH_DATA_MAX];
-    u8 protobuf[MELODI_MESH_STREAM_MAX];
-    u32 packet_ids[MELODI_MESH_SEGMENT_LIMIT];
+    u8 segment[MELODI_RADIO_PACKET_MAX];
+    u8 message[MELODI_RADIO_PAYLOAD_MAX];
+    u32 packet_ids[MELODI_RADIO_SEGMENT_LIMIT];
 };
 
 struct melodi_usb_device {
@@ -117,11 +124,10 @@ struct melodi_usb_device {
     struct workqueue_struct *workqueue;
     struct work_struct rx_work;
     struct work_struct config_work;
-    struct delayed_work handshake_work;
     struct delayed_work maintenance_work;
     struct mutex state_lock;
     struct mutex io_lock;
-    struct melodi_mesh_stream stream;
+    struct melodi_radio_stream stream;
     struct melodi_usb_reassembly reassemblies[MELODI_USB_REASSEMBLY_LIMIT];
     struct melodi_usb_route routes[MELODI_USB_ROUTING_LIMIT];
     struct melodi_link_config desired;
@@ -131,30 +137,22 @@ struct melodi_usb_device {
     atomic_t queue_free;
     atomic_t queue_maximum;
     unsigned long handshake_deadline;
-    u32 heartbeat_nonce;
     u32 local_locator;
-    u32 region;
-    u32 modem_preset;
+    u32 assigned_locator;
+    u16 packet_mtu;
     int failure;
     char firmware_version[32];
+    char hardware_version[32];
     u8 bulk_in;
     u8 bulk_out;
-    u8 hop_limit;
-    u8 config_stage;
-    u8 handshake_action;
     u8 profile;
+    u8 fault;
     bool disconnected;
     bool suspended;
     bool ready;
     bool config_pending;
     bool failed;
-    bool saw_my_info;
-    bool metadata_ok;
-    bool lora_ok;
-    bool mqtt_ok;
-    bool channel_ok;
-    bool config_complete;
-    bool queue_ok;
+    bool identified;
     bool pm_active;
     bool data_pm_active;
     bool direct_usb;
@@ -265,7 +263,8 @@ static int melodi_usb_write_bytes(struct melodi_usb_device *device,
     int actual = 0;
     int error = 0;
 
-    if (!data || !length || length > MELODI_MESH_STREAM_MAX + 4)
+    if (!data || !length ||
+        length > MELODI_RADIO_PAYLOAD_MAX + MELODI_RADIO_HEADER_SIZE)
         return -EINVAL;
     mutex_lock(&device->io_lock);
     if (READ_ONCE(device->disconnected)) {
@@ -317,25 +316,6 @@ unlock:
     return error;
 }
 
-static int melodi_usb_write_message(struct melodi_usb_device *device,
-                                    const void *message, size_t length)
-{
-    size_t framed_length;
-    void *framed;
-    int error;
-
-    if (!message || !length || length > MELODI_MESH_STREAM_MAX)
-        return -EINVAL;
-    framed = kmalloc(length + 4, GFP_KERNEL);
-    if (!framed)
-        return -ENOMEM;
-    error = melodi_mesh_stream_encode(message, length, framed, length + 4,
-                                      &framed_length);
-    if (!error)
-        error = melodi_usb_write_bytes(device, framed, framed_length);
-    kfree(framed);
-    return error;
-}
 
 static void melodi_usb_tx_error(struct melodi_usb_tx *transmit, int error)
 {
@@ -488,145 +468,96 @@ static void melodi_usb_route_expire(struct melodi_usb_device *device)
     }
 }
 
-static void melodi_usb_tx_complete(struct urb *urb)
-{
-    struct melodi_usb_tx *transmit = urb->context;
-    int error = urb->status;
-
-    if (error == -ENOENT || error == -ECONNRESET || error == -ESHUTDOWN)
-        error = -ENETDOWN;
-    if (error) {
-        unsigned int routes = melodi_usb_route_remove(transmit->device,
-                                                       transmit);
-
-        melodi_usb_tx_error(transmit, error);
-        melodi_usb_queue_release(transmit->device, routes);
-        while (routes--)
-            melodi_usb_tx_put(transmit);
-    }
-    melodi_usb_tx_put(transmit);
-}
 
 static int melodi_usb_xmit(struct net_device *netdev, struct sk_buff *frame,
                            const struct melodi_tx_meta *meta)
 {
     struct melodi_usb_device *device = melodi_transport_priv(netdev);
     struct melodi_usb_encode_batch *batch;
-    struct melodi_mesh_segment segment = {};
-    struct melodi_mesh_packet packet = {};
+    struct melodi_radio_segment segment = {};
+    struct melodi_radio_transmit request = {};
     struct melodi_usb_tx *transmit;
-    size_t transfer_capacity;
-    size_t transfer_length = 0;
     size_t segment_length;
-    size_t protobuf_length;
+    size_t message_length;
+    unsigned int payload_mtu;
     unsigned int count;
     unsigned int index;
-    struct urb *urb;
-    u8 *transfer;
-    u8 hop_limit;
     u32 local_number;
     bool queue_reserved = false;
     bool route_admitted = false;
     int error;
 
     if (!device || !frame || !meta || !frame->len ||
-        frame->len > MELODI_MESH_FRAME_MAX)
+        frame->len > MELODI_RADIO_FRAME_MAX)
         return -EINVAL;
     mutex_lock(&device->state_lock);
     local_number = device->local_locator;
-    hop_limit = device->hop_limit;
+    payload_mtu = device->packet_mtu > MELODI_RADIO_SEGMENT_SIZE ?
+                  device->packet_mtu - MELODI_RADIO_SEGMENT_SIZE : 0;
     if (!device->ready || device->disconnected || device->suspended ||
-        meta->source_locator != local_number) {
+        !payload_mtu || meta->source_locator != local_number) {
         mutex_unlock(&device->state_lock);
         return -ENETDOWN;
     }
     mutex_unlock(&device->state_lock);
-    count = DIV_ROUND_UP(frame->len, MELODI_MESH_FRAME_MTU);
-    if (!count || count > MELODI_MESH_SEGMENT_LIMIT)
+    count = DIV_ROUND_UP(frame->len, payload_mtu);
+    if (!count || count > MELODI_RADIO_SEGMENT_LIMIT)
         return -EMSGSIZE;
     error = melodi_usb_queue_reserve(device, count);
     if (error)
         return error;
     queue_reserved = true;
-    transfer_capacity = count * (MELODI_MESH_STREAM_MAX + 4);
-    transfer = kmalloc(transfer_capacity, GFP_KERNEL);
     transmit = kzalloc(sizeof(*transmit), GFP_KERNEL);
     batch = kzalloc(sizeof(*batch), GFP_KERNEL);
-    urb = usb_alloc_urb(0, GFP_KERNEL);
-    if (!transfer || !transmit || !batch || !urb) {
+    if (!transmit || !batch) {
         error = -ENOMEM;
         goto free;
     }
     segment.frame_id = melodi_usb_next_id(&device->frame_id);
     segment.total_length = frame->len;
     segment.count = count;
-    packet.to = meta->destination_locator;
-    packet.hop_limit = hop_limit;
-    packet.want_ack = packet.to != MELODI_MESH_BROADCAST;
-    for (index = 0; index < count; index++) {
-        size_t offset = (size_t)index * MELODI_MESH_FRAME_MTU;
-
-        segment.index = index;
-        segment.payload = frame->data + offset;
-        segment.payload_length = min_t(size_t, frame->len - offset,
-                                       MELODI_MESH_FRAME_MTU);
-        error = melodi_mesh_segment_encode(&segment, batch->segment,
-                                           sizeof(batch->segment),
-                                           &segment_length);
-        if (error)
-            goto free;
-        packet.id = melodi_usb_next_id(&device->packet_id);
-        batch->packet_ids[index] = packet.id;
-        packet.payload = batch->segment;
-        packet.payload_length = segment_length;
-        error = melodi_mesh_encode_to_radio(&packet, batch->protobuf,
-                                            sizeof(batch->protobuf),
-                                            &protobuf_length);
-        if (error)
-            goto free;
-        error = melodi_mesh_stream_encode(
-            batch->protobuf, protobuf_length, transfer + transfer_length,
-            transfer_capacity - transfer_length, &segment_length);
-        if (error)
-            goto free;
-        transfer_length += segment_length;
-    }
     transmit->device = device;
     transmit->frame = frame;
     transmit->cookie = meta->cookie;
     atomic_set(&transmit->error, 0);
     refcount_set(&transmit->references, 1);
-    if (packet.want_ack) {
-        error = melodi_usb_route_admit(device, transmit, batch->packet_ids,
-                                       count);
+    for (index = 0; index < count; index++)
+        batch->packet_ids[index] = melodi_usb_next_id(&device->packet_id);
+    error = melodi_usb_route_admit(device, transmit, batch->packet_ids,
+                                   count);
+    if (error)
+        goto free;
+    route_admitted = true;
+    for (index = 0; index < count; index++) {
+        size_t offset = (size_t)index * payload_mtu;
+
+        segment.index = index;
+        segment.payload = frame->data + offset;
+        segment.payload_length = min_t(size_t, frame->len - offset,
+                                       payload_mtu);
+        error = melodi_radio_segment_encode(&segment, batch->segment,
+                                            sizeof(batch->segment),
+                                            &segment_length);
         if (error)
             goto free;
-        route_admitted = true;
+        request.cookie = batch->packet_ids[index];
+        request.destination = meta->destination_locator;
+        request.payload = batch->segment;
+        request.payload_length = (u16)segment_length;
+        error = melodi_radio_encode_transmit(&request, batch->message,
+                                             sizeof(batch->message),
+                                             &message_length);
+        if (error)
+            goto free;
+        error = melodi_usb_write_bytes(device, batch->message,
+                                       message_length);
+        if (error)
+            goto free;
     }
-    usb_fill_bulk_urb(urb, device->usb,
-                      usb_sndbulkpipe(device->usb, device->bulk_out),
-                      transfer, transfer_length, melodi_usb_tx_complete,
-                      transmit);
-    urb->transfer_flags |= URB_FREE_BUFFER;
-    mutex_lock(&device->io_lock);
-    if (READ_ONCE(device->disconnected) || READ_ONCE(device->suspended)) {
-        error = -ENETDOWN;
-        mutex_unlock(&device->io_lock);
-        goto free_urb;
-    }
-    usb_anchor_urb(urb, &device->tx_anchor);
-    error = usb_submit_urb(urb, GFP_KERNEL);
-    if (error)
-        usb_unanchor_urb(urb);
-    mutex_unlock(&device->io_lock);
-    if (error)
-        goto free_urb;
-    usb_free_urb(urb);
     kfree(batch);
+    melodi_usb_tx_put(transmit);
     return 0;
 
-free_urb:
-    urb->transfer_flags &= ~URB_FREE_BUFFER;
 free:
     if (route_admitted) {
         unsigned int routes = melodi_usb_route_remove(device, transmit);
@@ -637,10 +568,8 @@ free:
     }
     if (queue_reserved && !route_admitted)
         melodi_usb_queue_release(device, count);
-    usb_free_urb(urb);
     kfree(transmit);
     kfree(batch);
-    kfree(transfer);
     return error;
 }
 
@@ -674,7 +603,7 @@ static void melodi_usb_get_info(struct net_device *netdev,
     struct melodi_usb_device *device = melodi_transport_priv(netdev);
 
     info->abi_version = MELODI_CORE_ABI_VERSION;
-    info->frame_mtu = MELODI_MESH_FRAME_MTU;
+    info->frame_mtu = MELODI_RADIO_FRAME_MAX;
     strscpy(info->driver_version, "usb-0.1.0",
             sizeof(info->driver_version));
     if (device) {
@@ -700,23 +629,31 @@ static int melodi_usb_airtime(struct net_device *netdev,
                               struct melodi_airtime_charge *charge)
 {
     struct melodi_usb_device *device = melodi_transport_priv(netdev);
-    u16 duty_permille;
-    u32 region;
+    unsigned int payload_mtu;
+    unsigned int segments;
+    u32 packet_us = 0;
+    u16 packet_mtu;
     int error;
 
     (void)meta;
     if (!device || !frame || !charge)
         return -EINVAL;
-    region = READ_ONCE(device->region);
-    error = melodi_mesh_region_duty_permille(region, &duty_permille);
+    mutex_lock(&device->state_lock);
+    packet_mtu = device->packet_mtu;
+    mutex_unlock(&device->state_lock);
+    if (packet_mtu <= MELODI_RADIO_SEGMENT_SIZE)
+        return -ENETDOWN;
+    payload_mtu = packet_mtu - MELODI_RADIO_SEGMENT_SIZE;
+    segments = DIV_ROUND_UP(frame->len, payload_mtu);
+    if (!segments || segments > MELODI_RADIO_SEGMENT_LIMIT)
+        return -EMSGSIZE;
+    error = melodi_radio_airtime_estimate(
+        (u8)radio_spreading_factor, (u16)radio_bandwidth_khz,
+        (u8)radio_coding_rate, packet_mtu, &packet_us);
     if (error)
         return error;
-    error = melodi_mesh_airtime_estimate(
-        READ_ONCE(device->modem_preset), region == 13, frame->len,
-        &charge->duration_us);
-    if (error)
-        return error;
-    charge->budget_us = MELODI_AIRTIME_WINDOW_US * duty_permille / 1000;
+    charge->duration_us = (u64)packet_us * segments;
+    charge->budget_us = MELODI_AIRTIME_WINDOW_US * radio_duty_permille / 1000;
     charge->broadcast_budget_us = charge->budget_us / 10;
     return 0;
 }
@@ -886,34 +823,11 @@ static int melodi_usb_cdc_connect(struct melodi_usb_device *device)
         USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
 }
 
-static s16 melodi_usb_snr(u32 bits)
-{
-    unsigned int exponent = bits >> 23 & 0xff;
-    unsigned int fraction = bits & 0x7fffff;
-    long value;
-    int shift;
-
-    if (!exponent || exponent == 0xff)
-        return 0;
-    value = 0x800000 | fraction;
-    shift = (int)exponent - 127 - 21;
-    if (shift >= 0) {
-        if (shift > 14)
-            return bits >> 31 ? -32768 : 32767;
-        value <<= shift;
-    } else if (shift > -31) {
-        value >>= -shift;
-    } else {
-        value = 0;
-    }
-    if (bits >> 31)
-        value = -value;
-    return clamp_t(long, value, -32768, 32767);
-}
 
 static struct melodi_usb_reassembly *melodi_usb_reassembly_find(
-    struct melodi_usb_device *device, const struct melodi_mesh_packet *packet,
-    const struct melodi_mesh_segment *segment)
+    struct melodi_usb_device *device,
+    const struct melodi_radio_receive *packet,
+    const struct melodi_radio_segment *segment)
 {
     struct melodi_usb_reassembly *empty = NULL;
     unsigned int index;
@@ -925,30 +839,36 @@ static struct melodi_usb_reassembly *melodi_usb_reassembly_find(
             melodi_usb_reassembly_clear(entry);
         if (!entry->active && !empty)
             empty = entry;
-        if (entry->active && entry->source == packet->from &&
+        if (entry->active && entry->source == packet->source &&
             entry->frame_id == segment->frame_id)
             return entry;
     }
     return empty;
 }
 
-static int melodi_usb_receive_segment(struct melodi_usb_device *device,
-                                      const struct melodi_mesh_packet *packet)
+static int melodi_usb_receive_segment(
+    struct melodi_usb_device *device,
+    const struct melodi_radio_receive *packet)
 {
     struct melodi_usb_reassembly *entry;
-    struct melodi_mesh_segment segment;
+    struct melodi_radio_segment segment;
     struct melodi_rx_meta metadata = {};
+    unsigned int payload_mtu;
     unsigned int complete_mask;
     size_t offset;
     int error;
 
-    error = melodi_mesh_segment_decode(packet->payload,
-                                       packet->payload_length, &segment);
+    error = melodi_radio_segment_decode(packet->payload,
+                                        packet->payload_length, &segment);
     if (error)
         return error;
-    if (packet->to != MELODI_MESH_BROADCAST &&
-        packet->to != device->local_locator)
+    if (packet->destination != MELODI_RADIO_LOCATOR_BROADCAST &&
+        packet->destination != device->local_locator)
         return -EHOSTUNREACH;
+    payload_mtu = device->packet_mtu > MELODI_RADIO_SEGMENT_SIZE ?
+                  device->packet_mtu - MELODI_RADIO_SEGMENT_SIZE : 0;
+    if (!payload_mtu)
+        return -ENETDOWN;
     entry = melodi_usb_reassembly_find(device, packet, &segment);
     if (!entry)
         return -ENOSPC;
@@ -958,18 +878,18 @@ static int melodi_usb_receive_segment(struct melodi_usb_device *device,
             return -ENOMEM;
         entry->active = true;
         entry->expires = jiffies + MELODI_USB_REASSEMBLY_TIMEOUT;
-        entry->source = packet->from;
-        entry->destination = packet->to;
+        entry->source = packet->source;
+        entry->destination = packet->destination;
         entry->frame_id = segment.frame_id;
         entry->total_length = segment.total_length;
         entry->count = segment.count;
-    } else if (entry->destination != packet->to ||
+    } else if (entry->destination != packet->destination ||
                entry->total_length != segment.total_length ||
                entry->count != segment.count) {
         melodi_usb_reassembly_clear(entry);
         return -EPROTO;
     }
-    offset = (size_t)segment.index * MELODI_MESH_FRAME_MTU;
+    offset = (size_t)segment.index * payload_mtu;
     if (entry->received & BIT(segment.index)) {
         if (!memcmp(entry->data + offset, segment.payload,
                     segment.payload_length))
@@ -984,299 +904,193 @@ static int melodi_usb_receive_segment(struct melodi_usb_device *device,
     if (entry->received != complete_mask)
         return 0;
     metadata.timestamp_ns = ktime_get_ns();
-    metadata.source_locator = packet->from;
-    metadata.destination_locator = packet->to;
-    metadata.rssi = clamp_t(s32, packet->rssi, -32768, 32767);
-    metadata.snr = melodi_usb_snr(packet->snr_bits);
-    if (packet->hop_start >= packet->hop_limit)
-        metadata.hops = packet->hop_start - packet->hop_limit;
+    metadata.source_locator = packet->source;
+    metadata.destination_locator = packet->destination;
+    metadata.rssi = packet->rssi;
+    metadata.snr = packet->snr;
+    metadata.hops = packet->hops;
     error = melodi_rx_frame(device->netdev, entry->data,
                             entry->total_length, &metadata);
     melodi_usb_reassembly_clear(entry);
     return error;
 }
-
-static int melodi_usb_send_heartbeat(struct melodi_usb_device *device)
-{
-    u8 protobuf[16];
-    u32 nonce;
-    size_t length;
-    int error;
-
-    mutex_lock(&device->state_lock);
-    nonce = ++device->heartbeat_nonce;
-    if (!nonce || nonce == 1)
-        nonce = device->heartbeat_nonce = 2;
-    mutex_unlock(&device->state_lock);
-    error = melodi_mesh_encode_heartbeat(nonce, protobuf, sizeof(protobuf),
-                                         &length);
-    return error ? error : melodi_usb_write_message(device, protobuf, length);
-}
-
-static void melodi_usb_send_disconnect(struct melodi_usb_device *device)
-{
-    u8 protobuf[8];
-    size_t length;
-
-    if (READ_ONCE(device->disconnected) || READ_ONCE(device->suspended))
-        return;
-    if (melodi_mesh_encode_disconnect(protobuf, sizeof(protobuf), &length))
-        return;
-    melodi_usb_write_message(device, protobuf, length);
-}
-
-static void melodi_usb_handshake_work(struct work_struct *work)
-{
-    struct melodi_usb_device *device = container_of(
-        to_delayed_work(work), struct melodi_usb_device, handshake_work);
-    u8 protobuf[16];
-    u8 action;
-    size_t length;
-    int error;
-
-    mutex_lock(&device->state_lock);
-    action = device->handshake_action;
-    device->handshake_action = MELODI_USB_HANDSHAKE_IDLE;
-    if (device->disconnected || device->suspended || device->failed)
-        action = MELODI_USB_HANDSHAKE_IDLE;
-    mutex_unlock(&device->state_lock);
-    if (action == MELODI_USB_HANDSHAKE_IDLE)
-        return;
-    if (action == MELODI_USB_HANDSHAKE_HEARTBEAT) {
-        error = melodi_usb_send_heartbeat(device);
-        if (!error) {
-            mutex_lock(&device->state_lock);
-            device->handshake_action = MELODI_USB_HANDSHAKE_NODES;
-            mutex_unlock(&device->state_lock);
-            queue_delayed_work(device->workqueue, &device->handshake_work,
-                               MELODI_USB_STAGE_DELAY);
-            return;
-        }
-    } else {
-        error = melodi_mesh_encode_want_config(
-            MELODI_MESH_NODES_NONCE, protobuf, sizeof(protobuf), &length);
-        if (!error)
-            error = melodi_usb_write_message(device, protobuf, length);
-    }
-    if (error)
-        melodi_usb_fail(device, error, MELODI_LINK_FAILURE_TRANSPORT,
-                        "configuration handshake stage");
-}
-
-static int melodi_usb_routing_error(s32 result)
+static int melodi_usb_result_error(u8 result)
 {
     switch (result) {
-    case 0:
+    case MELODI_RADIO_RESULT_SENT:
         return 0;
-    case 1:
-        return -EHOSTUNREACH;
-    case 2:
-        return -ECONNREFUSED;
-    case 3:
-    case 5:
-        return -ETIMEDOUT;
-    case 4:
-        return -ENETDOWN;
-    case 6:
-        return -ENETUNREACH;
-    case 7:
-        return -EMSGSIZE;
-    case 8:
-        return -ENOMSG;
-    case 9:
-    case 38:
+    case MELODI_RADIO_RESULT_BUSY:
         return -EAGAIN;
-    case 32:
-        return -EINVAL;
-    case 33:
-        return -EACCES;
-    case 34:
-    case 35:
-        return -EKEYREJECTED;
+    case MELODI_RADIO_RESULT_TOO_LARGE:
+        return -EMSGSIZE;
+    case MELODI_RADIO_RESULT_NOT_READY:
+        return -ENETDOWN;
+    case MELODI_RADIO_RESULT_DUTY:
+        return -EBUSY;
     default:
-        return -EREMOTEIO;
+        return -EIO;
     }
 }
 
-static void melodi_usb_advance_handshake(struct melodi_usb_device *device)
+static enum melodi_link_failure melodi_usb_fault_failure(u8 fault)
 {
-    bool make_ready = false;
-    u32 local_locator = 0;
+    switch (fault) {
+    case MELODI_RADIO_FAULT_HARDWARE:
+        return MELODI_LINK_FAILURE_MODEM;
+    case MELODI_RADIO_FAULT_REGION:
+        return MELODI_LINK_FAILURE_REGION;
+    case MELODI_RADIO_FAULT_MODEM:
+        return MELODI_LINK_FAILURE_MODEM;
+    case MELODI_RADIO_FAULT_LOCATOR:
+        return MELODI_LINK_FAILURE_NODE_NUMBER;
+    case MELODI_RADIO_FAULT_DOMAIN:
+        return MELODI_LINK_FAILURE_CHANNEL;
+    case MELODI_RADIO_FAULT_OVERRUN:
+        return MELODI_LINK_FAILURE_QUEUE_STATUS;
+    default:
+        return MELODI_LINK_FAILURE_INTERNAL;
+    }
+}
+
+static int melodi_usb_send_configure(struct melodi_usb_device *device)
+{
+    struct melodi_radio_configure config = {};
+    u8 message[MELODI_RADIO_PAYLOAD_MAX];
+    size_t length;
+    int error;
 
     mutex_lock(&device->state_lock);
-    if (device->disconnected || device->suspended || device->failed)
-        goto unlock;
-    if (device->saw_my_info && device->metadata_ok && device->lora_ok &&
-        device->mqtt_ok && device->channel_ok && device->config_complete &&
-        device->queue_ok && device->local_locator && !device->ready) {
-        device->ready = true;
-        local_locator = device->local_locator;
-        make_ready = true;
-    }
-unlock:
+    memcpy(config.domain, device->desired.mesh_domain,
+           sizeof(config.domain));
+    config.locator = device->assigned_locator;
     mutex_unlock(&device->state_lock);
-    if (make_ready)
-        melodi_link_ready(device->netdev, true, local_locator);
+    config.frequency_hz = radio_frequency_hz;
+    config.bandwidth_khz = (u16)radio_bandwidth_khz;
+    config.spreading_factor = (u8)radio_spreading_factor;
+    config.coding_rate = (u8)radio_coding_rate;
+    config.transmit_power_dbm = (s16)radio_transmit_power_dbm;
+    config.duty_permille = (u16)radio_duty_permille;
+    error = melodi_radio_encode_configure(&config, message, sizeof(message),
+                                          &length);
+    if (error)
+        return error;
+    return melodi_usb_write_bytes(device, message, length);
 }
 
-static void melodi_usb_handle_event(struct melodi_usb_device *device,
-                                    const struct melodi_mesh_event *event)
+static void melodi_usb_handle_info(struct melodi_usb_device *device,
+                                   const struct melodi_radio_info *info)
 {
-    bool reset = false;
-    bool schedule_stage = false;
-    enum melodi_link_failure failure = MELODI_LINK_FAILURE_NONE;
-    size_t index;
-    int error = 0;
+    int error;
 
-    if (event->type == MELODI_MESH_EVENT_PACKET) {
-        dev_info_ratelimited(&device->interface->dev,
-                             "DBG pkt port=%u from=%u to=%u len=%zu mqtt=%d ready=%d\n",
-                             event->packet.portnum, event->packet.from,
-                             event->packet.to, event->packet.payload_length,
-                             event->packet.via_mqtt,
-                             (int)READ_ONCE(device->ready));
-        if (event->packet.via_mqtt) {
-            device->netdev->stats.rx_dropped++;
-            return;
-        }
-        if (event->packet.portnum == MELODI_MESH_ROUTING_PORT) {
-            s32 result;
-            u32 request_id;
+    mutex_lock(&device->state_lock);
+    device->packet_mtu = info->packet_mtu;
+    device->identified = true;
+    strscpy(device->firmware_version, info->firmware,
+            sizeof(device->firmware_version));
+    strscpy(device->hardware_version, info->hardware,
+            sizeof(device->hardware_version));
+    atomic_set(&device->queue_maximum, info->queue_depth);
+    atomic_set(&device->queue_free, info->queue_depth);
+    mutex_unlock(&device->state_lock);
+    error = melodi_usb_send_configure(device);
+    if (error)
+        melodi_usb_fail(device, error, MELODI_LINK_FAILURE_TRANSPORT,
+                        "radio configuration request");
+}
 
-            error = melodi_mesh_decode_routing(&event->packet, &result,
-                                               &request_id);
-            if (!error)
-                melodi_usb_route_complete(
-                    device, request_id, melodi_usb_routing_error(result));
-            else
-                device->netdev->stats.rx_errors++;
-        } else if (event->packet.portnum == MELODI_MESH_PRIVATE_PORT &&
-            READ_ONCE(device->ready)) {
-            error = melodi_usb_receive_segment(device, &event->packet);
+static void melodi_usb_handle_status(struct melodi_usb_device *device,
+                                     const struct melodi_radio_status *status)
+{
+    bool ready = false;
+    u32 locator = 0;
+
+    atomic_set(&device->queue_maximum, status->queue_depth);
+    atomic_set(&device->queue_free, status->queue_free);
+    if (status->state == MELODI_RADIO_STATE_FAILED) {
+        melodi_usb_fail(device, -EPROTO,
+                        melodi_usb_fault_failure(status->fault),
+                        "radio reported a fault");
+        return;
+    }
+    mutex_lock(&device->state_lock);
+    device->fault = status->fault;
+    if (status->state == MELODI_RADIO_STATE_READY && device->identified &&
+        status->locator && status->locator == device->assigned_locator &&
+        !device->ready && !device->failed) {
+        device->ready = true;
+        device->local_locator = status->locator;
+        locator = status->locator;
+        ready = true;
+    }
+    mutex_unlock(&device->state_lock);
+    if (ready)
+        melodi_link_ready(device->netdev, true, locator);
+}
+
+static void melodi_usb_handle_message(struct melodi_usb_device *device,
+                                      const struct melodi_radio_header *header,
+                                      const u8 *payload)
+{
+    struct melodi_radio_result_report report;
+    struct melodi_radio_receive receive;
+    struct melodi_radio_status status;
+    struct melodi_radio_info info;
+    int error;
+
+    switch (header->type) {
+    case MELODI_RADIO_T_INFO:
+        error = melodi_radio_decode_info(payload, header->length, &info);
+        if (!error)
+            melodi_usb_handle_info(device, &info);
+        break;
+    case MELODI_RADIO_T_STATUS:
+        error = melodi_radio_decode_status(payload, header->length, &status);
+        if (!error)
+            melodi_usb_handle_status(device, &status);
+        break;
+    case MELODI_RADIO_T_RECEIVE:
+        error = melodi_radio_decode_receive(payload, header->length,
+                                            &receive);
+        if (!error && READ_ONCE(device->ready)) {
+            error = melodi_usb_receive_segment(device, &receive);
             if (error == -EALREADY || error == -EHOSTUNREACH)
                 error = 0;
             if (error)
                 device->netdev->stats.rx_errors++;
+            error = 0;
         }
-        return;
+        break;
+    case MELODI_RADIO_T_RESULT:
+        error = melodi_radio_decode_result(payload, header->length, &report);
+        if (!error)
+            melodi_usb_route_complete(
+                device, report.cookie,
+                melodi_usb_result_error(report.result));
+        break;
+    default:
+        error = -EOPNOTSUPP;
+        break;
     }
-    mutex_lock(&device->state_lock);
-    if (event->type == MELODI_MESH_EVENT_MY_INFO) {
-        device->saw_my_info = event->value != 0;
-        device->local_locator = event->value;
-    } else if (event->type == MELODI_MESH_EVENT_METADATA) {
-        for (index = 0; index < event->metadata.firmware_length; index++)
-            if (event->metadata.firmware[index] < 0x20 ||
-                event->metadata.firmware[index] > 0x7e)
-                break;
-        if (index == event->metadata.firmware_length) {
-            index = min_t(size_t, index,
-                          sizeof(device->firmware_version) - 1);
-            memcpy(device->firmware_version, event->metadata.firmware, index);
-            device->firmware_version[index] = 0;
-        } else {
-            strscpy(device->firmware_version, "invalid",
-                    sizeof(device->firmware_version));
-        }
-        device->metadata_ok = melodi_usb_firmware_supported(
-            (const char *)event->metadata.firmware,
-            event->metadata.firmware_length,
-            device->profile == MELODI_USB_CONTRACT_TEST);
-        if (!device->metadata_ok)
-            failure = MELODI_LINK_FAILURE_FIRMWARE;
-    } else if (event->type == MELODI_MESH_EVENT_LORA_CONFIG) {
-        u16 duty_permille;
-        u64 airtime_us;
-
-        if (!event->lora.use_preset ||
-            melodi_mesh_airtime_estimate(
-                event->lora.modem_preset, event->lora.region == 13, 1,
-                &airtime_us))
-            failure = MELODI_LINK_FAILURE_MODEM;
-        else if (melodi_mesh_region_duty_permille(event->lora.region,
-                                                   &duty_permille))
-            failure = MELODI_LINK_FAILURE_REGION;
-        else if (!event->lora.hop_limit || event->lora.hop_limit > 7)
-            failure = MELODI_LINK_FAILURE_HOP_LIMIT;
-        else if (!event->lora.tx_enabled)
-            failure = MELODI_LINK_FAILURE_RADIO_TX;
-        else if (event->lora.override_duty_cycle)
-            failure = MELODI_LINK_FAILURE_RADIO_TX;
-        device->lora_ok = failure == MELODI_LINK_FAILURE_NONE;
-        device->hop_limit = event->lora.hop_limit;
-        device->region = event->lora.region;
-        device->modem_preset = event->lora.modem_preset;
-    } else if (event->type == MELODI_MESH_EVENT_MQTT_CONFIG) {
-        device->mqtt_ok = !event->enabled;
-        if (!device->mqtt_ok)
-            failure = MELODI_LINK_FAILURE_MQTT;
-    } else if (event->type == MELODI_MESH_EVENT_CHANNEL &&
-               event->channel.index == 0) {
-        device->channel_ok = event->channel.has_settings &&
-                             event->channel.role == 1 &&
-                             !event->channel.uplink_enabled &&
-                             !event->channel.downlink_enabled;
-        if (!device->channel_ok)
-            failure = MELODI_LINK_FAILURE_CHANNEL;
-    } else if (event->type == MELODI_MESH_EVENT_CONFIG_COMPLETE) {
-        if (!device->config_stage &&
-            event->value == MELODI_MESH_CONFIG_NONCE) {
-            device->config_stage = 1;
-            device->handshake_action =
-                MELODI_USB_HANDSHAKE_HEARTBEAT;
-            schedule_stage = true;
-        } else if (device->config_stage == 1 &&
-                   event->value == MELODI_MESH_NODES_NONCE) {
-            device->config_stage = 2;
-            device->config_complete = true;
-        } else {
-            failure = MELODI_LINK_FAILURE_CONFIG_NONCE;
-        }
-    } else if (event->type == MELODI_MESH_EVENT_QUEUE_STATUS) {
-        device->queue_ok = event->queue.maximum &&
-                           event->queue.free <= event->queue.maximum;
-        if (event->queue.packet_id && event->queue.result)
-            melodi_usb_route_complete(device, event->queue.packet_id,
-                                      -ENOBUFS);
-        atomic_set(&device->queue_maximum, event->queue.maximum);
-        atomic_set(&device->queue_free, event->queue.free);
-        if (!device->queue_ok)
-            failure = MELODI_LINK_FAILURE_QUEUE_STATUS;
-    } else if (event->type == MELODI_MESH_EVENT_RADIO_RESET) {
-        reset = event->value;
+    if (error && error != -EOPNOTSUPP) {
+        device->netdev->stats.rx_errors++;
+        if (!READ_ONCE(device->ready))
+            melodi_usb_fail(device, error, MELODI_LINK_FAILURE_PROTOBUF,
+                            "radio message record");
     }
-    mutex_unlock(&device->state_lock);
-    if (schedule_stage)
-        mod_delayed_work(device->workqueue, &device->handshake_work,
-                         MELODI_USB_STAGE_DELAY);
-    if (failure != MELODI_LINK_FAILURE_NONE)
-        error = failure == MELODI_LINK_FAILURE_FIRMWARE ?
-                -EPROTONOSUPPORT : -EPROTO;
-    if (error) {
-        melodi_usb_fail(device, error, failure,
-                        "incompatible radio configuration");
-        return;
-    }
-    if (reset) {
-        melodi_link_ready(device->netdev, false, 0);
-        melodi_transport_configure(device->netdev);
-        return;
-    }
-    melodi_usb_advance_handshake(device);
 }
+
 
 static void melodi_usb_parse_chunk(struct melodi_usb_device *device,
                                    const struct melodi_usb_rx_chunk *chunk)
 {
-    const u8 *message;
-    struct melodi_mesh_event event;
-    size_t message_length;
+    const struct melodi_radio_header *header;
+    const u8 *payload;
     unsigned int index;
     int result;
 
     for (index = 0; index < chunk->length; index++) {
-        result = melodi_mesh_stream_feed(&device->stream, chunk->data[index],
-                                         &message, &message_length);
+        result = melodi_radio_stream_feed(&device->stream, chunk->data[index],
+                                          &header, &payload);
         if (result < 0) {
             device->netdev->stats.rx_errors++;
             if (!READ_ONCE(device->ready))
@@ -1286,16 +1100,7 @@ static void melodi_usb_parse_chunk(struct melodi_usb_device *device,
         }
         if (!result)
             continue;
-        result = melodi_mesh_decode_from_radio_event(
-            message, message_length, &event);
-        if (!result)
-            melodi_usb_handle_event(device, &event);
-        else if (result != -ENOMSG) {
-            device->netdev->stats.rx_errors++;
-            if (!READ_ONCE(device->ready))
-                melodi_usb_fail(device, result, MELODI_LINK_FAILURE_PROTOBUF,
-                                "radio protobuf record");
-        }
+        melodi_usb_handle_message(device, header, payload);
     }
 }
 
@@ -1329,17 +1134,12 @@ static void melodi_usb_rx_work(struct work_struct *work)
 
 static void melodi_usb_config_work(struct work_struct *work)
 {
-    static const u8 wake[] = {
-        MELODI_MESH_STREAM_START1, MELODI_MESH_STREAM_START1,
-        MELODI_MESH_STREAM_START1, MELODI_MESH_STREAM_START1,
-    };
     struct melodi_usb_device *device = container_of(
         work, struct melodi_usb_device, config_work);
-    u8 protobuf[16];
+    u8 message[MELODI_RADIO_PAYLOAD_MAX];
     size_t length;
     int error;
 
-    cancel_delayed_work(&device->handshake_work);
     mutex_lock(&device->state_lock);
     if (!device->config_pending || device->disconnected ||
         device->suspended) {
@@ -1350,38 +1150,34 @@ static void melodi_usb_config_work(struct work_struct *work)
     device->failed = false;
     device->failure = 0;
     device->ready = false;
-    device->saw_my_info = false;
-    device->metadata_ok = false;
-    device->lora_ok = false;
-    device->mqtt_ok = false;
-    device->channel_ok = false;
-    device->config_complete = false;
-    device->queue_ok = false;
+    device->identified = false;
+    device->fault = MELODI_RADIO_FAULT_NONE;
     atomic_set(&device->queue_free, 0);
     atomic_set(&device->queue_maximum, 0);
     device->local_locator = 0;
-    device->hop_limit = 0;
-    device->region = 0;
-    device->modem_preset = 0;
-    device->config_stage = 0;
-    device->handshake_action = MELODI_USB_HANDSHAKE_IDLE;
-    device->heartbeat_nonce = 1;
+    device->packet_mtu = 0;
+    device->assigned_locator = device->desired.locator;
     device->handshake_deadline = jiffies + MELODI_USB_HANDSHAKE_TIMEOUT;
-    melodi_mesh_stream_init(&device->stream);
+    melodi_radio_stream_init(&device->stream);
     melodi_usb_reassembly_reset(device);
     mutex_unlock(&device->state_lock);
-    error = melodi_usb_write_bytes(device, wake, sizeof(wake));
+    if (!device->assigned_locator ||
+        device->assigned_locator == MELODI_RADIO_LOCATOR_BROADCAST) {
+        melodi_usb_fail(device, -EINVAL, MELODI_LINK_FAILURE_NODE_NUMBER,
+                        "core supplied no usable locator");
+        return;
+    }
+    error = melodi_radio_encode_reset(message, sizeof(message), &length);
     if (!error)
-        msleep(100);
+        error = melodi_usb_write_bytes(device, message, length);
     if (!error)
-        error = melodi_mesh_encode_want_config(MELODI_MESH_CONFIG_NONCE,
-                                               protobuf, sizeof(protobuf),
-                                               &length);
+        error = melodi_radio_encode_identify(message, sizeof(message),
+                                             &length);
     if (!error)
-        error = melodi_usb_write_message(device, protobuf, length);
+        error = melodi_usb_write_bytes(device, message, length);
     if (error) {
         melodi_usb_fail(device, error, MELODI_LINK_FAILURE_TRANSPORT,
-                        "configuration handshake request");
+                        "radio identify request");
         return;
     }
     queue_delayed_work(device->workqueue, &device->maintenance_work, HZ);
@@ -1592,11 +1388,9 @@ static int melodi_usb_state_init(struct melodi_usb_device *device)
     atomic_set(&device->io_error, 0);
     atomic_set(&device->queue_free, 0);
     atomic_set(&device->queue_maximum, 0);
-    melodi_mesh_stream_init(&device->stream);
+    melodi_radio_stream_init(&device->stream);
     INIT_WORK(&device->rx_work, melodi_usb_rx_work);
     INIT_WORK(&device->config_work, melodi_usb_config_work);
-    INIT_DELAYED_WORK(&device->handshake_work,
-                      melodi_usb_handshake_work);
     INIT_DELAYED_WORK(&device->maintenance_work,
                       melodi_usb_maintenance_work);
     device->workqueue = alloc_ordered_workqueue("melodi_usb",
@@ -1759,7 +1553,6 @@ static void melodi_usb_quiesce(struct melodi_usb_device *device,
     mutex_unlock(&device->io_lock);
     melodi_usb_route_reset(device, -ENETDOWN);
     cancel_delayed_work_sync(&device->maintenance_work);
-    cancel_delayed_work_sync(&device->handshake_work);
     flush_workqueue(device->workqueue);
     melodi_usb_rx_queue_clear(device);
     melodi_usb_reassembly_reset(device);
@@ -1821,7 +1614,7 @@ static int melodi_usb_resume(struct usb_interface *interface)
     device->suspended = false;
     device->config_pending = true;
     device->failed = false;
-    melodi_mesh_stream_init(&device->stream);
+    melodi_radio_stream_init(&device->stream);
     mutex_unlock(&device->state_lock);
     error = melodi_usb_submit_all_rx(device);
     if (error) {
@@ -1933,7 +1726,6 @@ static void melodi_tty_close(struct tty_struct *tty)
         return;
     netdev = device->netdev;
     usb = device->usb;
-    melodi_usb_send_disconnect(device);
     melodi_usb_quiesce(device, true);
     tty->disc_data = NULL;
     destroy_workqueue(device->workqueue);

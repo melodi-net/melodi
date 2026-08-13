@@ -10,7 +10,7 @@
 
 #include "melodi.h"
 
-#define MELODI_CORE_ABI_VERSION 8
+#define MELODI_CORE_ABI_VERSION 9
 #define MELODI_LINK_LOCATOR_BROADCAST 0xffffffffU
 #ifndef MELODI_AIRTIME_WINDOW_US
 #define MELODI_AIRTIME_WINDOW_US 3600000000ULL
@@ -36,6 +36,7 @@ struct melodi_rx_meta {
 
 struct melodi_link_config {
     u8 mesh_domain[32];
+    u32 locator;
 };
 
 struct melodi_link_info {

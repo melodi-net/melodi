@@ -127,20 +127,24 @@ if grep -RInE 'MELODI_MESH_RADIO_CONFIG|MELODI_MESH_.*CAPABILIT|melodi_mesh_radi
     exit 1
 fi
 
-grep -q '^#define MELODI_MESH_PRIVATE_PORT 256$' \
-    src/proto/meshtastic.h || {
-    printf '%s\n' 'stock PRIVATE_APP PortNum is required' >&2
+grep -q 'melodi_radio_stream_feed' src/kernel/usb/main.c || {
+    printf '%s\n' 'the backend must decode the native radio protocol' >&2
     exit 1
 }
-grep -q 'MELODI_MESH_EVENT_MY_INFO' src/kernel/usb/main.c || {
-    printf '%s\n' 'stock MyNodeInfo readiness is required' >&2
+grep -q 'config.locator = melodi->local_native_locator' \
+    src/kernel/core/main.c || {
+    printf '%s\n' 'the core must assign the native locator to the backend' >&2
     exit 1
 }
-grep -q 'melodi_link_ready(device->netdev, true, local_locator)' \
+grep -q 'melodi_link_ready(device->netdev, true, locator)' \
     src/kernel/usb/main.c || {
-    printf '%s\n' 'stock NodeNum must be reported as the link locator' >&2
+    printf '%s\n' 'the backend must report the assigned locator' >&2
     exit 1
 }
+if grep -RIn 'melodi_mesh_' src/kernel/usb/main.c; then
+    printf '%s\n' 'the backend must not use a Meshtastic client protocol' >&2
+    exit 1
+fi
 
 if grep -niE 'meshtastic|protobuf|portnum|phoneapi|usb_(ep|descriptor)' \
     src/kernel/include/melodi/core.h; then

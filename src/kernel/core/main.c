@@ -892,6 +892,7 @@ int melodi_transport_configure(struct net_device *dev)
     }
     memcpy(config.mesh_domain, melodi->mesh_domain,
            sizeof(config.mesh_domain));
+    config.locator = melodi->local_native_locator;
     melodi->transport_ready = false;
     melodi->local_link_locator = 0;
     melodi->link_state = MELODI_LINK_CONFIGURING;
