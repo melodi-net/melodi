@@ -11,7 +11,7 @@ LDLIBS += $(shell pkg-config --libs openssl libsodium 2>/dev/null || printf '%s'
 
 .PHONY: test codec-test clean
 
-test: $(UNIT_DIR)/test_nodeid $(UNIT_DIR)/test_setup $(UNIT_DIR)/test_ed25519 $(UNIT_DIR)/test_discovery $(UNIT_DIR)/test_mapping $(UNIT_DIR)/test_collision_fixture $(UNIT_DIR)/test_wire $(UNIT_DIR)/test_genl $(UNIT_DIR)/test_meshtastic $(UNIT_DIR)/test_usb_contract $(UNIT_DIR)/test_usb_attach $(UNIT_DIR)/test_reliability $(UNIT_DIR)/test_replay $(UNIT_DIR)/test_ordering $(UNIT_DIR)/test_airtime $(UNIT_DIR)/genl_vector_c $(UNIT_DIR)/genl_vector_rs
+test: $(UNIT_DIR)/test_nodeid $(UNIT_DIR)/test_setup $(UNIT_DIR)/test_ed25519 $(UNIT_DIR)/test_discovery $(UNIT_DIR)/test_mapping $(UNIT_DIR)/test_collision_fixture $(UNIT_DIR)/test_wire $(UNIT_DIR)/test_genl $(UNIT_DIR)/test_meshtastic $(UNIT_DIR)/test_radio $(UNIT_DIR)/test_usb_contract $(UNIT_DIR)/test_usb_attach $(UNIT_DIR)/test_reliability $(UNIT_DIR)/test_replay $(UNIT_DIR)/test_ordering $(UNIT_DIR)/test_airtime $(UNIT_DIR)/genl_vector_c $(UNIT_DIR)/genl_vector_rs
 	@$(UNIT_DIR)/test_nodeid
 	@$(UNIT_DIR)/test_setup
 	@$(UNIT_DIR)/test_ed25519
@@ -21,6 +21,7 @@ test: $(UNIT_DIR)/test_nodeid $(UNIT_DIR)/test_setup $(UNIT_DIR)/test_ed25519 $(
 	@$(UNIT_DIR)/test_wire
 	@$(UNIT_DIR)/test_genl
 	@$(UNIT_DIR)/test_meshtastic
+	@$(UNIT_DIR)/test_radio
 	@$(UNIT_DIR)/test_usb_contract
 	@$(UNIT_DIR)/test_usb_attach
 	@$(UNIT_DIR)/test_reliability
@@ -31,12 +32,13 @@ test: $(UNIT_DIR)/test_nodeid $(UNIT_DIR)/test_setup $(UNIT_DIR)/test_ed25519 $(
 	@$(UNIT_DIR)/genl_vector_rs > $(UNIT_DIR)/genl.rs.bin
 	@cmp $(UNIT_DIR)/genl.c.bin $(UNIT_DIR)/genl.rs.bin
 
-codec-test: $(UNIT_DIR)/test_setup $(UNIT_DIR)/test_discovery $(UNIT_DIR)/test_wire $(UNIT_DIR)/test_genl $(UNIT_DIR)/test_meshtastic $(UNIT_DIR)/test_usb_contract $(UNIT_DIR)/test_usb_attach $(UNIT_DIR)/test_reliability $(UNIT_DIR)/test_replay $(UNIT_DIR)/test_ordering $(UNIT_DIR)/test_airtime
+codec-test: $(UNIT_DIR)/test_setup $(UNIT_DIR)/test_discovery $(UNIT_DIR)/test_wire $(UNIT_DIR)/test_genl $(UNIT_DIR)/test_meshtastic $(UNIT_DIR)/test_radio $(UNIT_DIR)/test_usb_contract $(UNIT_DIR)/test_usb_attach $(UNIT_DIR)/test_reliability $(UNIT_DIR)/test_replay $(UNIT_DIR)/test_ordering $(UNIT_DIR)/test_airtime
 	@$(UNIT_DIR)/test_setup
 	@$(UNIT_DIR)/test_discovery
 	@$(UNIT_DIR)/test_wire
 	@$(UNIT_DIR)/test_genl
 	@$(UNIT_DIR)/test_meshtastic
+	@$(UNIT_DIR)/test_radio
 	@$(UNIT_DIR)/test_usb_contract
 	@$(UNIT_DIR)/test_usb_attach
 	@$(UNIT_DIR)/test_reliability
@@ -72,6 +74,9 @@ $(UNIT_DIR)/test_genl: unit/test_genl.c ../src/proto/genl.c | $(UNIT_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@
 
 $(UNIT_DIR)/test_meshtastic: unit/test_meshtastic.c ../src/proto/meshtastic.c | $(UNIT_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@
+
+$(UNIT_DIR)/test_radio: unit/test_radio.c ../src/proto/radio.c | $(UNIT_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@
 
 $(UNIT_DIR)/test_usb_contract: unit/test_usb_contract.c ../src/kernel/usb/contract.c | $(UNIT_DIR)

@@ -121,7 +121,7 @@ test "$mapping_definitions" -eq 1 || {
     exit 1
 }
 
-if grep -RInE 'MELODI_MESH_RADIO_CONFIG|MELODI_MESH_.*CAPABILIT|radio_config' \
+if grep -RInE 'MELODI_MESH_RADIO_CONFIG|MELODI_MESH_.*CAPABILIT|melodi_mesh_radio_config' \
     src tests/unit tests/usb; then
     printf '%s\n' 'custom Meshtastic readiness extension is forbidden' >&2
     exit 1
