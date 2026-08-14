@@ -347,18 +347,10 @@ static void melodi_setup(struct net_device *dev)
     dev->needs_free_netdev = true;
 }
 
-static struct net_device *melodi_alloc_device(bool persistent)
+static void melodi_device_init(struct net_device *dev, bool persistent)
 {
-    struct melodi_device_entry *entry;
-    struct melodi_device *melodi;
-    struct net_device *dev;
-    int error;
+    struct melodi_device *melodi = netdev_priv(dev);
 
-    dev = alloc_netdev_mqs(sizeof(*melodi), "mel%d", NET_NAME_ENUM,
-                           melodi_setup, 4, 1);
-    if (!dev)
-        return ERR_PTR(-ENOMEM);
-    melodi = netdev_priv(dev);
     melodi->magic = MELODI_DEVICE_MAGIC;
     melodi->netdev = dev;
     mutex_init(&melodi->lock);
@@ -373,6 +365,34 @@ static struct net_device *melodi_alloc_device(bool persistent)
     melodi->persistent = persistent;
     melodi->link_state = MELODI_LINK_DISCONNECTED;
     netif_carrier_off(dev);
+}
+
+size_t melodi_link_priv_size(void)
+{
+    return sizeof(struct melodi_device);
+}
+EXPORT_SYMBOL_GPL(melodi_link_priv_size);
+
+void melodi_link_setup(struct net_device *dev)
+{
+    melodi_setup(dev);
+    melodi_device_init(dev, false);
+}
+EXPORT_SYMBOL_GPL(melodi_link_setup);
+
+static struct net_device *melodi_alloc_device(bool persistent)
+{
+    struct melodi_device_entry *entry;
+    struct melodi_device *melodi;
+    struct net_device *dev;
+    int error;
+
+    dev = alloc_netdev_mqs(sizeof(*melodi), "mel%d", NET_NAME_ENUM,
+                           melodi_setup, 4, 1);
+    if (!dev)
+        return ERR_PTR(-ENOMEM);
+    melodi = netdev_priv(dev);
+    melodi_device_init(dev, persistent);
     error = register_netdev(dev);
     if (error) {
         free_netdev(dev);
@@ -855,6 +875,74 @@ struct net_device *melodi_attach_selected_transport(
     return dev;
 }
 EXPORT_SYMBOL_GPL(melodi_attach_selected_transport);
+
+/**
+ * melodi_link_attach - bind transport operations to an rtnl-created device
+ * @dev: device allocated with melodi_link_setup() and already registered
+ * @ops: sleepable transport operations
+ * @owner: module owning @ops
+ * @driver_private_size: octets reserved for melodi_transport_priv()
+ */
+int melodi_link_attach(struct net_device *dev,
+                       const struct melodi_link_ops *ops,
+                       struct module *owner, size_t driver_private_size)
+{
+    struct melodi_transport *transport;
+    struct melodi_device *melodi;
+
+    if (!melodi_device_is(dev) || !ops || !ops->xmit || !owner ||
+        driver_private_size > KMALLOC_MAX_SIZE - sizeof(*transport))
+        return -EINVAL;
+    transport = kzalloc(struct_size(transport, private_data,
+                                    driver_private_size), GFP_KERNEL);
+    if (!transport)
+        return -ENOMEM;
+    transport->ops = ops;
+    transport->owner = owner;
+    transport->parent = NULL;
+    transport->private_size = driver_private_size;
+    refcount_set(&transport->references, 1);
+    init_completion(&transport->released);
+    melodi = netdev_priv(dev);
+    mutex_lock(&melodi->lock);
+    if (melodi->transport) {
+        mutex_unlock(&melodi->lock);
+        kfree(transport);
+        return -EBUSY;
+    }
+    melodi->transport = transport;
+    melodi->link_state = MELODI_LINK_CONFIGURING;
+    melodi->link_failure = MELODI_LINK_FAILURE_NONE;
+    melodi->link_error = 0;
+    mutex_unlock(&melodi->lock);
+    netif_dormant_on(dev);
+    return 0;
+}
+EXPORT_SYMBOL_GPL(melodi_link_attach);
+
+/**
+ * melodi_link_release - stop core work before an rtnl device is unregistered
+ * @dev: device previously passed to melodi_link_attach()
+ */
+void melodi_link_release(struct net_device *dev)
+{
+    struct melodi_device *melodi;
+
+    if (!melodi_device_is(dev))
+        return;
+    melodi = netdev_priv(dev);
+    melodi_detach_transport(dev);
+    melodi_netlink_interface_removed(dev);
+    melodi_logical_stop(melodi, -ENODEV);
+    melodi_queue_stop(dev);
+    melodi_discovery_stop(melodi);
+    melodi_data_stop(melodi);
+    if (melodi->identity_key) {
+        key_put(melodi->identity_key);
+        melodi->identity_key = NULL;
+    }
+}
+EXPORT_SYMBOL_GPL(melodi_link_release);
 
 void *melodi_transport_priv(struct net_device *dev)
 {

@@ -57,14 +57,15 @@ trap cleanup EXIT INT TERM
 
 insmod "$core"
 test -d /sys/class/net/mel0
-test "$(cat /sys/class/net/mel0/carrier)" -eq 0
+test "$(cat /sys/class/net/mel0/operstate)" = down
 "$tool" status -i mel0 | grep -Fx 'mel0: disconnected'
 ip link set dev mel0 up
+test "$(cat /sys/class/net/mel0/carrier)" -eq 0
 ip -details link show dev mel0 | grep -F 'NO-CARRIER'
 
 insmod "$loop"
 test -d /sys/class/net/mel1
-"$tool" status -i mel0 | grep -Fx 'mel0: configuring'
+"$tool" status -i mel0 | grep -E '^mel0: configuring( |$)'
 ip link set dev mel1 up
 parameters=/sys/module/melodi_loop/parameters
 printf '%s\n' 1 >"$parameters/fault_reset"
@@ -77,8 +78,8 @@ if "$tool" identity load -i mel0 --generation 1 "$identity0"; then
     exit 1
 fi
 "$tool" identity load -i mel0 --generation 2 "$identity0"
-"$tool" status -i mel0 | grep -Fx 'mel0: ready'
-"$tool" status -i mel1 | grep -Fx 'mel1: ready'
+"$tool" status -i mel0 | grep -E '^mel0: ready( |$)'
+"$tool" status -i mel1 | grep -E '^mel1: ready( |$)'
 tc qdisc replace dev mel0 root handle 1: mq
 tc qdisc replace dev mel0 parent 1:1 handle 10: pfifo limit 128
 node0=$("$tool" id -i mel0)

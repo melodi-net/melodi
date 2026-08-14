@@ -77,6 +77,12 @@ struct melodi_link_ops {
                    struct melodi_airtime_charge *charge);
 };
 
+size_t melodi_link_priv_size(void);
+void melodi_link_setup(struct net_device *dev);
+int melodi_link_attach(struct net_device *dev,
+                       const struct melodi_link_ops *ops,
+                       struct module *owner, size_t driver_private_size);
+void melodi_link_release(struct net_device *dev);
 struct net_device *melodi_attach_transport(struct device *parent,
                                            size_t driver_private_size,
                                            const struct melodi_link_ops *ops,
