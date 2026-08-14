@@ -373,10 +373,16 @@ size_t melodi_link_priv_size(void)
 }
 EXPORT_SYMBOL_GPL(melodi_link_priv_size);
 
+/**
+ * melodi_link_setup - rtnl_link_ops setup for a caller-allocated device
+ * @dev: device allocated by rtnetlink with melodi_link_priv_size() private
+ *
+ * Marks the device persistent, so detaching a transport leaves it registered.
+ */
 void melodi_link_setup(struct net_device *dev)
 {
     melodi_setup(dev);
-    melodi_device_init(dev, false);
+    melodi_device_init(dev, true);
 }
 EXPORT_SYMBOL_GPL(melodi_link_setup);
 

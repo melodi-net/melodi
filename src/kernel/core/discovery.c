@@ -512,6 +512,23 @@ unlock:
                              MELODI_NATIVE_LOCATOR_BROADCAST);
 }
 
+/**
+ * melodi_responder_locked - decide which peer answers a hello with a challenge
+ * @melodi: local device state
+ * @peer: authenticated remote identity
+ *
+ * Both peers announce independently, so both would otherwise challenge each
+ * other and derive two sessions with different ephemeral keys. The identity
+ * ordering is total and antisymmetric, so exactly one peer challenges and one
+ * session exists per pair.
+ */
+static bool melodi_responder_locked(const struct melodi_device *melodi,
+                                    const struct melodi_node_id *peer)
+{
+    return memcmp(melodi->node_id.bytes, peer->bytes,
+                  MELODI_NODE_ID_SIZE) > 0;
+}
+
 static int melodi_receive_hello(struct net_device *dev, const void *frame,
                                 size_t length, bool conflict,
                                 const struct melodi_rx_meta *meta)
@@ -522,6 +539,8 @@ static int melodi_receive_hello(struct net_device *dev, const void *frame,
     bool conflicted = false;
     bool local_changed = false;
     bool local_collision = false;
+    bool responder = false;
+    bool established = false;
     int error;
 
     error = conflict ? melodi_wire_decode_conflict(frame, length, &hello) :
@@ -553,6 +572,8 @@ static int melodi_receive_hello(struct net_device *dev, const void *frame,
             msecs_to_jiffies(hello.expiry_seconds * 1000U);
         melodi_peer_observe_locked(peer, meta);
         conflicted = peer->conflicted;
+        responder = melodi_responder_locked(melodi, &peer->node_id);
+        established = peer->session_ready;
         melodi_peer_expiry_schedule_locked(melodi);
     }
     mutex_unlock(&melodi->lock);
@@ -568,7 +589,9 @@ static int melodi_receive_hello(struct net_device *dev, const void *frame,
                melodi_discovery_announce(dev) : 0;
     if (!netif_running(dev) || !netif_carrier_ok(dev))
         return 0;
-    return melodi_send_challenge(dev, &hello);
+    if (responder)
+        return melodi_send_challenge(dev, &hello);
+    return established ? 0 : melodi_discovery_announce(dev);
 }
 
 static int melodi_auth_validate(struct melodi_device *melodi,
