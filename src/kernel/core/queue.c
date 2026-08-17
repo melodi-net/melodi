@@ -1081,8 +1081,23 @@ static int melodi_queue_data(struct melodi_device *melodi, u64 now_ms)
     return selected;
 }
 
+/* A half-duplex radio cannot hear the reply it provoked while transmitting. */
+static void melodi_queue_pacing(struct melodi_device *melodi, bool *busy,
+                                u64 *guard_ms)
+{
+    struct melodi_link_info info;
+
+    *busy = false;
+    *guard_ms = 0;
+    if (melodi_core_link_info(melodi->netdev, &info))
+        return;
+    *busy = info.transmit_pending != 0;
+    *guard_ms = info.frame_pace_us / 2000;
+}
+
 static void melodi_queue_expire_locked(struct melodi_device *melodi,
-                                       u64 now_ms)
+                                       u64 now_ms,
+                                       struct melodi_queue_notice *notice)
 {
     unsigned int index;
 
@@ -1090,9 +1105,12 @@ static void melodi_queue_expire_locked(struct melodi_device *melodi,
         if (melodi->tx_queue[index].active &&
             !melodi->tx_queue[index].in_flight &&
             now_ms >= melodi->tx_queue[index].expires_ms) {
-            struct sk_buff *frame = melodi_queue_remove_locked(
-                melodi, &melodi->tx_queue[index]);
+            struct sk_buff *frame;
 
+            melodi_queue_notice_entry(notice, &melodi->tx_queue[index],
+                                      -ETIMEDOUT);
+            frame = melodi_queue_remove_locked(
+                melodi, &melodi->tx_queue[index]);
             kfree_skb(frame);
             melodi->netdev->stats.tx_dropped++;
             atomic64_inc(&melodi->queue_expired);
@@ -1175,17 +1193,18 @@ static void melodi_queue_work(struct work_struct *work)
 {
     struct melodi_device *melodi = container_of(
         to_delayed_work(work), struct melodi_device, tx_queue_work);
-    struct melodi_airtime_window airtime_after;
-    struct melodi_airtime_window broadcast_after;
     struct melodi_airtime_charge charge;
     struct melodi_queue_notice notice = {};
+    struct melodi_queue_notice expired = {};
     struct melodi_tx_meta metadata;
     struct melodi_tx_queue_entry *entry;
     struct sk_buff *frame;
     unsigned long delay;
     u64 wait_ms = 0;
     u64 now_ms;
+    u64 guard_ms;
     bool airtime_admitted = false;
+    bool link_busy;
     bool broadcast;
     bool budget_checked = false;
     bool selected_control;
@@ -1193,13 +1212,24 @@ static void melodi_queue_work(struct work_struct *work)
     int selected;
     int error;
 
+    melodi_queue_pacing(melodi, &link_busy, &guard_ms);
     mutex_lock(&melodi_queue_lock);
     if (melodi->tx_queue_stopping) {
         mutex_unlock(&melodi_queue_lock);
         return;
     }
     now_ms = melodi_queue_now();
-    melodi_queue_expire_locked(melodi, now_ms);
+    melodi_queue_expire_locked(melodi, now_ms, &expired);
+    if (link_busy)
+        melodi->tx_guard_until_ms = now_ms + guard_ms;
+    if (melodi->tx_queue_count &&
+        (link_busy || now_ms < melodi->tx_guard_until_ms)) {
+        mod_delayed_work(system_wq, &melodi->tx_queue_work,
+                         msecs_to_jiffies(100));
+        mutex_unlock(&melodi_queue_lock);
+        melodi_queue_notify(melodi->netdev, &expired);
+        return;
+    }
     if (melodi->tx_queue_count <= MELODI_TX_LOW_WATER &&
         netif_running(melodi->netdev) && netif_carrier_ok(melodi->netdev))
         netif_tx_wake_all_queues(melodi->netdev);
@@ -1217,6 +1247,7 @@ static void melodi_queue_work(struct work_struct *work)
         if (delay && !melodi->tx_queue_stopping)
             mod_delayed_work(system_wq, &melodi->tx_queue_work, delay);
         mutex_unlock(&melodi_queue_lock);
+        melodi_queue_notify(melodi->netdev, &expired);
         return;
     }
     entry = &melodi->tx_queue[selected];
@@ -1227,6 +1258,7 @@ static void melodi_queue_work(struct work_struct *work)
     broadcast = !entry->control &&
                 metadata.destination_locator == MELODI_LINK_LOCATOR_BROADCAST;
     mutex_unlock(&melodi_queue_lock);
+    melodi_queue_notify(melodi->netdev, &expired);
 
     if (!selected_control) {
         mutex_lock(&melodi->lock);
@@ -1273,8 +1305,8 @@ static void melodi_queue_work(struct work_struct *work)
     else if (!error) {
         budget_checked = true;
         error = melodi_queue_airtime_locked(
-            melodi, &charge, broadcast, now_ms, &airtime_after,
-            &broadcast_after, &wait_ms);
+            melodi, &charge, broadcast, now_ms, &melodi->tx_airtime_after,
+            &melodi->tx_broadcast_after, &wait_ms);
     }
     if (error == -EAGAIN && budget_checked) {
         atomic64_inc(&melodi->duty_defers);
@@ -1286,6 +1318,7 @@ static void melodi_queue_work(struct work_struct *work)
         return;
     }
     if (error) {
+        melodi_queue_notice_entry(&notice, entry, error);
         frame = melodi_queue_remove_locked(melodi, entry);
         kfree_skb(frame);
         melodi->netdev->stats.tx_dropped++;
@@ -1298,6 +1331,7 @@ static void melodi_queue_work(struct work_struct *work)
         if (melodi->tx_queue_count)
             mod_delayed_work(system_wq, &melodi->tx_queue_work, 1);
         mutex_unlock(&melodi_queue_lock);
+        melodi_queue_notify(melodi->netdev, &notice);
         return;
     }
     airtime_admitted = charge.duration_us != 0;
@@ -1313,14 +1347,16 @@ static void melodi_queue_work(struct work_struct *work)
         entry->in_flight = false;
         entry->defer_until_ms = min_t(u64, entry->expires_ms, now_ms + 100);
     } else {
+        if (error)
+            melodi_queue_notice_entry(&notice, entry, error);
         melodi_queue_remove_locked(melodi, entry);
         if (error) {
             kfree_skb(frame);
             melodi->netdev->stats.tx_dropped++;
         } else {
             if (airtime_admitted) {
-                melodi->tx_airtime = airtime_after;
-                melodi->tx_broadcast_airtime = broadcast_after;
+                melodi->tx_airtime = melodi->tx_airtime_after;
+                melodi->tx_broadcast_airtime = melodi->tx_broadcast_after;
             }
             if (selected_control && melodi->tx_control_burst < U8_MAX)
                 melodi->tx_control_burst++;
@@ -1335,6 +1371,7 @@ static void melodi_queue_work(struct work_struct *work)
     if (melodi->tx_queue_count && !melodi->tx_queue_stopping)
         mod_delayed_work(system_wq, &melodi->tx_queue_work, 1);
     mutex_unlock(&melodi_queue_lock);
+    melodi_queue_notify(melodi->netdev, &notice);
 }
 
 void melodi_queue_state_changed(struct net_device *dev)
@@ -1461,6 +1498,7 @@ static void melodi_queue_drain(struct net_device *dev, int error)
     memset(melodi->tx_flows, 0, sizeof(melodi->tx_flows));
     melodi->tx_queue_bytes = 0;
     melodi->tx_queue_count = 0;
+    melodi->tx_guard_until_ms = 0;
     melodi->tx_control_burst = 0;
     melodi->tx_airtime_budget_us = 0;
     melodi->tx_broadcast_budget_us = 0;
@@ -1494,6 +1532,33 @@ void melodi_queue_fail(struct net_device *dev, int error)
 void melodi_queue_stop(struct net_device *dev)
 {
     melodi_queue_fail(dev, -ENODEV);
+}
+
+bool melodi_queue_message_queued(struct net_device *dev,
+                                 const struct melodi_node_id *destination,
+                                 u64 message_id, u32 binding_portid,
+                                 u64 binding_generation, u16 service)
+{
+    struct melodi_device *melodi = netdev_priv(dev);
+    unsigned int index;
+    bool queued = false;
+
+    mutex_lock(&melodi_queue_lock);
+    for (index = 0; index < MELODI_TX_QUEUE_LIMIT; index++) {
+        const struct melodi_tx_queue_entry *entry = &melodi->tx_queue[index];
+
+        if (!entry->active || !entry->reliable ||
+            entry->message_id != message_id ||
+            entry->binding_portid != binding_portid ||
+            entry->binding_generation != binding_generation ||
+            entry->service != service ||
+            memcmp(&entry->destination, destination, sizeof(*destination)))
+            continue;
+        queued = true;
+        break;
+    }
+    mutex_unlock(&melodi_queue_lock);
+    return queued;
 }
 
 void melodi_queue_stats(struct net_device *dev, u64 *frames, u64 *bytes,

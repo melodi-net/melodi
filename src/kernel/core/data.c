@@ -927,6 +927,7 @@ static void melodi_reliability_work(struct work_struct *work)
     u16 source_service = 0;
     unsigned int count = 0;
     unsigned int index;
+    bool busy = melodi_core_link_busy(dev);
     int terminal = 0;
     int result;
 
@@ -947,8 +948,13 @@ static void melodi_reliability_work(struct work_struct *work)
             melodi_pending_clear(pending);
             break;
         }
-        result = melodi_reliability_poll(&pending->reliability,
-                                         melodi_reliability_now(), &missing);
+        result = melodi_reliability_poll(
+            &pending->reliability, melodi_reliability_now(),
+            busy || melodi_queue_message_queued(
+                dev, &pending->destination, pending->reliability.message_id,
+                pending->binding_portid, pending->binding_generation,
+                pending->source_service),
+            &missing);
         if (result < 0 && result != -ENOENT) {
             terminal = result;
             cookie = pending->cookie;
@@ -1322,7 +1328,8 @@ static int melodi_pending_admit_locked(
     u32 source_native_locator, u32 destination_native_locator,
     u32 generation,
     u32 destination_generation, u64 session_epoch,
-    u64 message_id, u16 fragment_count, u32 ttl_ms, u32 binding_portid,
+    u64 message_id, u16 fragment_count, u32 ttl_ms, u32 pace_ms,
+    u32 binding_portid,
     u64 binding_generation, u8 priority, struct sk_buff **frames,
     struct net_device *dev, u64 reservation)
 {
@@ -1346,7 +1353,8 @@ static int melodi_pending_admit_locked(
     if (now_ms > U64_MAX - ttl_ms)
         return -EOVERFLOW;
     error = melodi_reliability_start(&pending->reliability, message_id,
-                                     generation, fragment_count, now_ms);
+                                     generation, fragment_count, now_ms,
+                                     pace_ms, ttl_ms);
     if (error)
         return error;
     pending->destination = *destination;
@@ -1665,6 +1673,7 @@ static int melodi_data_send_internal(
     size_t offset;
     u32 frame_mtu;
     u32 ordering_marker = 0;
+    u32 pace_ms;
     u32 payload_mtu;
     u32 reserved_locator = MELODI_NATIVE_LOCATOR_INVALID;
     u16 fragment_count;
@@ -1705,6 +1714,7 @@ static int melodi_data_send_internal(
             return error;
     }
     frame_mtu = melodi_core_frame_mtu(dev);
+    pace_ms = melodi_core_frame_pace_ms(dev);
     if (frame_mtu < MELODI_WIRE_DATA_SIZE ||
         (length && frame_mtu == MELODI_WIRE_DATA_SIZE))
         return -EMSGSIZE;
@@ -1834,7 +1844,7 @@ unlock:
                 header.common.destination_native_locator,
                 header.common.identity_generation, peer->generation,
                 peer->session_epoch, message_id, fragment_count,
-                ttl_ms, binding_portid, binding_generation, priority,
+                ttl_ms, pace_ms, binding_portid, binding_generation, priority,
                 batch->frames, dev, reservation);
         mutex_unlock(&melodi->lock);
         if (error)

@@ -10,7 +10,7 @@
 
 #include "melodi.h"
 
-#define MELODI_CORE_ABI_VERSION 9
+#define MELODI_CORE_ABI_VERSION 10
 #define MELODI_LINK_LOCATOR_BROADCAST 0xffffffffU
 #ifndef MELODI_AIRTIME_WINDOW_US
 #define MELODI_AIRTIME_WINDOW_US 3600000000ULL
@@ -42,6 +42,8 @@ struct melodi_link_config {
 struct melodi_link_info {
     u32 abi_version;
     u32 frame_mtu;
+    u32 frame_pace_us;
+    u32 transmit_pending;
     enum melodi_link_state state;
     char driver_version[MELODI_BUS_INFO_MAX + 1];
     char firmware_version[MELODI_BUS_INFO_MAX + 1];

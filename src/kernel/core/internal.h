@@ -386,6 +386,9 @@ struct melodi_device {
     struct work_struct logical_tx_work;
     struct melodi_airtime_window tx_airtime;
     struct melodi_airtime_window tx_broadcast_airtime;
+    struct melodi_airtime_window tx_airtime_after;
+    struct melodi_airtime_window tx_broadcast_after;
+    u64 tx_guard_until_ms;
     u64 tx_queue_sequence;
     u64 tx_group_sequence;
     u64 tx_reservation_sequence;
@@ -480,8 +483,14 @@ int melodi_queue_reservation_locator(struct net_device *dev, u64 reservation,
                                      u32 *locator);
 void melodi_queue_stats(struct net_device *dev, u64 *frames, u64 *bytes,
                         u64 *airtime_us, u64 *broadcast_airtime_us);
+bool melodi_queue_message_queued(struct net_device *dev,
+                                 const struct melodi_node_id *destination,
+                                 u64 message_id, u32 binding_portid,
+                                 u64 binding_generation, u16 service);
 int melodi_counter_next_locked(struct melodi_device *melodi, u64 *counter);
 u32 melodi_core_frame_mtu(struct net_device *dev);
+u32 melodi_core_frame_pace_ms(struct net_device *dev);
+bool melodi_core_link_busy(struct net_device *dev);
 int melodi_identity_key_matches(struct key *key,
                                 const struct melodi_node_id *node_id);
 int melodi_identity_sign(struct net_device *dev, const void *message,

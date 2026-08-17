@@ -14,8 +14,8 @@ typedef uint32_t melodi_airtime_u32;
 typedef uint64_t melodi_airtime_u64;
 #endif
 
-#define MELODI_AIRTIME_BUCKETS 60
-#define MELODI_AIRTIME_SLOT_MS 60000ULL
+#define MELODI_AIRTIME_BUCKETS 360
+#define MELODI_AIRTIME_SLOT_MS 10000ULL
 #ifndef MELODI_AIRTIME_WINDOW_US
 #define MELODI_AIRTIME_WINDOW_US 3600000000ULL
 #endif

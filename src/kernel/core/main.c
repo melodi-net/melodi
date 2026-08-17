@@ -708,6 +708,24 @@ u32 melodi_core_frame_mtu(struct net_device *dev)
     return info.frame_mtu;
 }
 
+u32 melodi_core_frame_pace_ms(struct net_device *dev)
+{
+    struct melodi_link_info info;
+
+    if (melodi_core_link_info(dev, &info))
+        return 0;
+    return info.frame_pace_us / USEC_PER_MSEC;
+}
+
+bool melodi_core_link_busy(struct net_device *dev)
+{
+    struct melodi_link_info info;
+
+    if (melodi_core_link_info(dev, &info))
+        return false;
+    return info.transmit_pending != 0;
+}
+
 struct net_device *melodi_attach_transport(struct device *parent,
                                            size_t driver_private_size,
                                            const struct melodi_link_ops *ops,
