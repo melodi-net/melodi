@@ -595,3 +595,10 @@ int melodi_tty_release_at(const char *sysfs_root, const char *device_root,
                       interface_index);
     return unlink(path) < 0 ? -errno : 0;
 }
+
+int melodi_tty_release_all_at(const char *sysfs_root)
+{
+    if (!sysfs_root || sysfs_root[0] != '/')
+        return -EINVAL;
+    return melodi_tty_parameter(sysfs_root, "release_all", "1");
+}

@@ -16,5 +16,6 @@ int melodi_tty_attach_serial_at(const char *sysfs_root,
                                 const char *expected_serial);
 int melodi_tty_release_at(const char *sysfs_root, const char *device_root,
                           unsigned int interface_index);
+int melodi_tty_release_all_at(const char *sysfs_root);
 
 #endif

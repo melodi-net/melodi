@@ -1974,13 +1974,14 @@ static void melodi_tty_reap(struct work_struct *work)
     }
 }
 
-static void melodi_tty_release_all(void)
+/* Releases every attachment, including one whose device node is already gone. */
+static unsigned int melodi_tty_release_each(void)
 {
     struct tty_struct *ttys[MELODI_TTY_LIMIT] = { 0 };
+    unsigned int released = 0;
     unsigned int index;
 
     mutex_lock(&melodi_tty_lock);
-    melodi_tty_ready = false;
     for (index = 0; index < MELODI_TTY_LIMIT; index++) {
         ttys[index] = melodi_ttys[index];
         melodi_ttys[index] = NULL;
@@ -1996,7 +1997,17 @@ static void melodi_tty_release_all(void)
             ttys[index]->ops->close(ttys[index], NULL);
         tty_unlock(ttys[index]);
         tty_kclose(ttys[index]);
+        released++;
     }
+    return released;
+}
+
+static void melodi_tty_release_all(void)
+{
+    mutex_lock(&melodi_tty_lock);
+    melodi_tty_ready = false;
+    mutex_unlock(&melodi_tty_lock);
+    melodi_tty_release_each();
 }
 
 static int melodi_tty_attach_set(const char *value,
@@ -2021,6 +2032,17 @@ static int melodi_tty_release_set(const char *value,
     return error ? error : melodi_tty_release_device(number);
 }
 
+static int melodi_tty_release_all_set(const char *value,
+                                      const struct kernel_param *parameter)
+{
+    (void)parameter;
+    if (!value || (value[0] != '1') ||
+        (value[1] && value[1] != '\n' && value[1] != 0))
+        return -EINVAL;
+    melodi_tty_release_each();
+    return 0;
+}
+
 static const struct kernel_param_ops melodi_tty_attach_ops = {
     .set = melodi_tty_attach_set,
 };
@@ -2029,8 +2051,13 @@ static const struct kernel_param_ops melodi_tty_release_ops = {
     .set = melodi_tty_release_set,
 };
 
+static const struct kernel_param_ops melodi_tty_release_all_ops = {
+    .set = melodi_tty_release_all_set,
+};
+
 module_param_cb(attach, &melodi_tty_attach_ops, NULL, 0200);
 module_param_cb(release, &melodi_tty_release_ops, NULL, 0200);
+module_param_cb(release_all, &melodi_tty_release_all_ops, NULL, 0200);
 
 static const struct usb_device_id melodi_usb_ids[] = {
     {

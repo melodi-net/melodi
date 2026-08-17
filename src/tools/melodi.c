@@ -282,6 +282,10 @@ static int melodi_tty_release(void)
         if (error && error != -ENOENT && !result)
             result = error;
     }
+    /* Reaches an attachment whose device node was already removed. */
+    error = melodi_tty_release_all_at("/sys");
+    if (error && error != -ENOENT && !result)
+        result = error;
     return result;
 }
 
