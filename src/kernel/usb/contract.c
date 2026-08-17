@@ -13,6 +13,7 @@ int melodi_usb_contract_validate(const struct melodi_usb_contract *contract)
 {
     static const char test_product[] = MELODI_USB_TEST_PRODUCT_NAME;
     static const char pico_product[] = MELODI_USB_PICO_PRODUCT_NAME;
+    static const char feather_product[] = MELODI_USB_FEATHER_PRODUCT_NAME;
     const char *product;
     size_t product_length;
     unsigned int max_packet;
@@ -42,21 +43,29 @@ int melodi_usb_contract_validate(const struct melodi_usb_contract *contract)
         max_packet = MELODI_USB_TEST_MAX_PACKET;
         in = MELODI_USB_TEST_IN;
         out = MELODI_USB_TEST_OUT;
-    } else if (contract->profile == MELODI_USB_CONTRACT_PICO) {
-        if (contract->vendor != MELODI_USB_PICO_VENDOR ||
-            contract->product_id != MELODI_USB_PICO_PRODUCT ||
-            contract->device_version != MELODI_USB_PICO_BCD ||
-            contract->interface_number != MELODI_USB_PICO_INTERFACE ||
-            contract->interface_class != MELODI_USB_PICO_CLASS ||
-            contract->interface_subclass != MELODI_USB_PICO_SUBCLASS ||
-            contract->interface_protocol != MELODI_USB_PICO_PROTOCOL ||
+    } else if (contract->profile == MELODI_USB_CONTRACT_CDC) {
+        if (contract->vendor == MELODI_USB_PICO_VENDOR &&
+            contract->product_id == MELODI_USB_PICO_PRODUCT &&
+            contract->device_version == MELODI_USB_PICO_BCD) {
+            product = pico_product;
+            product_length = sizeof(pico_product) - 1;
+        } else if (contract->vendor == MELODI_USB_FEATHER_VENDOR &&
+                   contract->product_id == MELODI_USB_FEATHER_PRODUCT &&
+                   contract->device_version == MELODI_USB_FEATHER_BCD) {
+            product = feather_product;
+            product_length = sizeof(feather_product) - 1;
+        } else {
+            return -ENODEV;
+        }
+        if (contract->interface_number != MELODI_USB_CDC_INTERFACE ||
+            contract->interface_class != MELODI_USB_CDC_CLASS ||
+            contract->interface_subclass != MELODI_USB_CDC_SUBCLASS ||
+            contract->interface_protocol != MELODI_USB_CDC_PROTOCOL ||
             !contract->full_speed || contract->serial_length != 16)
             return -ENODEV;
-        product = pico_product;
-        product_length = sizeof(pico_product) - 1;
-        max_packet = MELODI_USB_PICO_MAX_PACKET;
-        in = MELODI_USB_PICO_IN;
-        out = MELODI_USB_PICO_OUT;
+        max_packet = MELODI_USB_CDC_MAX_PACKET;
+        in = MELODI_USB_CDC_IN;
+        out = MELODI_USB_CDC_OUT;
     } else {
         return -ENODEV;
     }
@@ -68,7 +77,7 @@ int melodi_usb_contract_validate(const struct melodi_usb_contract *contract)
             contract->serial[index] > 0x7e ||
             contract->serial[index] == ',')
             return -ENODEV;
-    if (contract->profile == MELODI_USB_CONTRACT_PICO)
+    if (contract->profile == MELODI_USB_CONTRACT_CDC)
         for (index = 0; index < contract->serial_length; index++)
             if (!((contract->serial[index] >= '0' &&
                    contract->serial[index] <= '9') ||

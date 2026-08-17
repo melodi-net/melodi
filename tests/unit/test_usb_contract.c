@@ -41,9 +41,9 @@ static struct melodi_usb_contract valid_pico_contract(void)
     static const char serial[] = "DF643CF0134A4C26";
     struct melodi_usb_contract contract = {
         .endpoints = {
-            { MELODI_USB_PICO_MAX_PACKET, MELODI_USB_PICO_OUT,
+            { MELODI_USB_CDC_MAX_PACKET, MELODI_USB_CDC_OUT,
               MELODI_USB_ENDPOINT_BULK },
-            { MELODI_USB_PICO_MAX_PACKET, MELODI_USB_PICO_IN,
+            { MELODI_USB_CDC_MAX_PACKET, MELODI_USB_CDC_IN,
               MELODI_USB_ENDPOINT_BULK },
         },
         .product = product,
@@ -53,12 +53,12 @@ static struct melodi_usb_contract valid_pico_contract(void)
         .vendor = MELODI_USB_PICO_VENDOR,
         .product_id = MELODI_USB_PICO_PRODUCT,
         .device_version = MELODI_USB_PICO_BCD,
-        .interface_number = MELODI_USB_PICO_INTERFACE,
-        .interface_class = MELODI_USB_PICO_CLASS,
-        .interface_subclass = MELODI_USB_PICO_SUBCLASS,
-        .interface_protocol = MELODI_USB_PICO_PROTOCOL,
+        .interface_number = MELODI_USB_CDC_INTERFACE,
+        .interface_class = MELODI_USB_CDC_CLASS,
+        .interface_subclass = MELODI_USB_CDC_SUBCLASS,
+        .interface_protocol = MELODI_USB_CDC_PROTOCOL,
         .endpoint_count = MELODI_USB_CONTRACT_ENDPOINTS,
-        .profile = MELODI_USB_CONTRACT_PICO,
+        .profile = MELODI_USB_CONTRACT_CDC,
         .full_speed = true,
     };
 
@@ -125,8 +125,8 @@ int main(void)
     assert(melodi_usb_contract_validate(&contract) == -ENODEV);
     contract = valid_pico_contract();
     assert(melodi_usb_contract_validate(&contract) == 0);
-    contract.endpoints[0].address = MELODI_USB_PICO_IN;
-    contract.endpoints[1].address = MELODI_USB_PICO_OUT;
+    contract.endpoints[0].address = MELODI_USB_CDC_IN;
+    contract.endpoints[1].address = MELODI_USB_CDC_OUT;
     assert(melodi_usb_contract_validate(&contract) == 0);
     contract = valid_pico_contract();
     contract.serial = "df643cf0134a4c26";

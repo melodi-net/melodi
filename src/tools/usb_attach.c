@@ -193,26 +193,26 @@ static int melodi_usb_validate_control(const char *root,
 
     error = melodi_usb_expected_number(root, interface_name,
                                        "bInterfaceNumber", 16,
-                                       MELODI_USB_PICO_CONTROL_INTERFACE);
+                                       MELODI_USB_CDC_CONTROL_INTERFACE);
     if (!error)
         error = melodi_usb_expected_number(root, interface_name,
                                            "bInterfaceClass", 16,
-                                           MELODI_USB_PICO_CONTROL_CLASS);
+                                           MELODI_USB_CDC_CONTROL_CLASS);
     if (!error)
         error = melodi_usb_expected_number(root, interface_name,
                                            "bInterfaceSubClass", 16,
-                                           MELODI_USB_PICO_CONTROL_SUBCLASS);
+                                           MELODI_USB_CDC_CONTROL_SUBCLASS);
     if (!error)
         error = melodi_usb_expected_number(root, interface_name,
                                            "bInterfaceProtocol", 16,
-                                           MELODI_USB_PICO_CONTROL_PROTOCOL);
+                                           MELODI_USB_CDC_CONTROL_PROTOCOL);
     if (!error)
         error = melodi_usb_expected_number(root, interface_name,
                                            "bNumEndpoints", 10, 1);
     if (!error)
         error = melodi_usb_validate_endpoint(root, interface_name, "ep_81",
-                                             MELODI_USB_PICO_CONTROL_IN, 3,
-                                             MELODI_USB_PICO_CONTROL_MAX_PACKET);
+                                             MELODI_USB_CDC_CONTROL_IN, 3,
+                                             MELODI_USB_CDC_CONTROL_MAX_PACKET);
     return error;
 }
 
@@ -262,20 +262,28 @@ int melodi_usb_validate_device_at(
     char product[MELODI_SYSFS_VALUE_MAX];
     struct melodi_usb_contract contract = { 0 };
     unsigned int speed;
+    unsigned int vendor;
+    unsigned int product_id;
+    unsigned int device_version;
     int error;
 
     if (!serial || !melodi_usb_device_name_valid(device_name))
         return -EINVAL;
-    error = melodi_usb_expected_number(sysfs_root, device_name, "idVendor",
-                                       16, MELODI_USB_PICO_VENDOR);
+    error = melodi_usb_number(sysfs_root, device_name, "idVendor", 16,
+                              &vendor);
     if (!error)
-        error = melodi_usb_expected_number(sysfs_root, device_name,
-                                           "idProduct", 16,
-                                           MELODI_USB_PICO_PRODUCT);
+        error = melodi_usb_number(sysfs_root, device_name, "idProduct", 16,
+                                  &product_id);
     if (!error)
-        error = melodi_usb_expected_number(sysfs_root, device_name,
-                                           "bcdDevice", 16,
-                                           MELODI_USB_PICO_BCD);
+        error = melodi_usb_number(sysfs_root, device_name, "bcdDevice", 16,
+                                  &device_version);
+    if (!error && !((vendor == MELODI_USB_PICO_VENDOR &&
+                     product_id == MELODI_USB_PICO_PRODUCT &&
+                     device_version == MELODI_USB_PICO_BCD) ||
+                    (vendor == MELODI_USB_FEATHER_VENDOR &&
+                     product_id == MELODI_USB_FEATHER_PRODUCT &&
+                     device_version == MELODI_USB_FEATHER_BCD)))
+        error = -ENODEV;
     if (!error)
         error = melodi_usb_expected_number(sysfs_root, device_name,
                                            "bNumConfigurations", 10, 1);
@@ -305,15 +313,15 @@ int melodi_usb_validate_device_at(
         error = melodi_usb_validate_data(sysfs_root, data_name, &contract);
     if (error)
         return error;
-    contract.vendor = MELODI_USB_PICO_VENDOR;
-    contract.product_id = MELODI_USB_PICO_PRODUCT;
-    contract.device_version = MELODI_USB_PICO_BCD;
-    contract.interface_number = MELODI_USB_PICO_INTERFACE;
-    contract.interface_class = MELODI_USB_PICO_CLASS;
-    contract.interface_subclass = MELODI_USB_PICO_SUBCLASS;
-    contract.interface_protocol = MELODI_USB_PICO_PROTOCOL;
+    contract.vendor = vendor;
+    contract.product_id = product_id;
+    contract.device_version = device_version;
+    contract.interface_number = MELODI_USB_CDC_INTERFACE;
+    contract.interface_class = MELODI_USB_CDC_CLASS;
+    contract.interface_subclass = MELODI_USB_CDC_SUBCLASS;
+    contract.interface_protocol = MELODI_USB_CDC_PROTOCOL;
     contract.endpoint_count = MELODI_USB_CONTRACT_ENDPOINTS;
-    contract.profile = MELODI_USB_CONTRACT_PICO;
+    contract.profile = MELODI_USB_CONTRACT_CDC;
     contract.full_speed = speed == 12;
     contract.product = product;
     contract.product_length = strlen(product);

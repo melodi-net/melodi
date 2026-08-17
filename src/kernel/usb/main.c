@@ -603,7 +603,8 @@ static void melodi_usb_get_info(struct net_device *netdev,
     struct melodi_usb_device *device = melodi_transport_priv(netdev);
 
     info->abi_version = MELODI_CORE_ABI_VERSION;
-    info->frame_mtu = MELODI_RADIO_FRAME_MAX;
+    info->frame_mtu = MELODI_RADIO_FRAME_MAX < MELODI_FRAME_MTU_MAX ?
+                      MELODI_RADIO_FRAME_MAX : MELODI_FRAME_MTU_MAX;
     strscpy(info->driver_version, "usb-0.1.0",
             sizeof(info->driver_version));
     if (device) {
@@ -802,24 +803,24 @@ static int melodi_usb_cdc_set_line(struct melodi_usb_device *device)
         .bDataBits = 8,
     };
 
-    if (device->profile != MELODI_USB_CONTRACT_PICO)
+    if (device->profile != MELODI_USB_CONTRACT_CDC)
         return 0;
     return usb_control_msg_send(
         device->usb, 0, USB_CDC_REQ_SET_LINE_CODING,
         USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE, 0,
-        MELODI_USB_PICO_CONTROL_INTERFACE, &line, sizeof(line),
+        MELODI_USB_CDC_CONTROL_INTERFACE, &line, sizeof(line),
         USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
 }
 
 static int melodi_usb_cdc_connect(struct melodi_usb_device *device)
 {
-    if (device->profile != MELODI_USB_CONTRACT_PICO)
+    if (device->profile != MELODI_USB_CONTRACT_CDC)
         return 0;
     return usb_control_msg_send(
         device->usb, 0, USB_CDC_REQ_SET_CONTROL_LINE_STATE,
         USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
         USB_CDC_CTRL_DTR | USB_CDC_CTRL_RTS,
-        MELODI_USB_PICO_CONTROL_INTERFACE, NULL, 0,
+        MELODI_USB_CDC_CONTROL_INTERFACE, NULL, 0,
         USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
 }
 
@@ -1211,7 +1212,7 @@ static void melodi_usb_maintenance_work(struct work_struct *work)
 static int melodi_usb_validate_pico_control(struct usb_device *usb)
 {
     struct usb_interface *interface = usb_ifnum_to_if(
-        usb, MELODI_USB_PICO_CONTROL_INTERFACE);
+        usb, MELODI_USB_CDC_CONTROL_INTERFACE);
     struct usb_host_interface *setting;
     struct usb_endpoint_descriptor *endpoint;
 
@@ -1219,19 +1220,19 @@ static int melodi_usb_validate_pico_control(struct usb_device *usb)
         return -ENODEV;
     setting = interface->cur_altsetting;
     if (setting->desc.bInterfaceNumber !=
-            MELODI_USB_PICO_CONTROL_INTERFACE ||
+            MELODI_USB_CDC_CONTROL_INTERFACE ||
         setting->desc.bAlternateSetting ||
-        setting->desc.bInterfaceClass != MELODI_USB_PICO_CONTROL_CLASS ||
+        setting->desc.bInterfaceClass != MELODI_USB_CDC_CONTROL_CLASS ||
         setting->desc.bInterfaceSubClass !=
-            MELODI_USB_PICO_CONTROL_SUBCLASS ||
+            MELODI_USB_CDC_CONTROL_SUBCLASS ||
         setting->desc.bInterfaceProtocol !=
-            MELODI_USB_PICO_CONTROL_PROTOCOL ||
+            MELODI_USB_CDC_CONTROL_PROTOCOL ||
         setting->desc.bNumEndpoints != 1)
         return -ENODEV;
     endpoint = &setting->endpoint[0].desc;
     if (!usb_endpoint_is_int_in(endpoint) ||
-        endpoint->bEndpointAddress != MELODI_USB_PICO_CONTROL_IN ||
-        usb_endpoint_maxp(endpoint) != MELODI_USB_PICO_CONTROL_MAX_PACKET)
+        endpoint->bEndpointAddress != MELODI_USB_CDC_CONTROL_IN ||
+        usb_endpoint_maxp(endpoint) != MELODI_USB_CDC_CONTROL_MAX_PACKET)
         return -ENODEV;
     return 0;
 }
@@ -1290,12 +1291,12 @@ static int melodi_usb_validate_interface(struct usb_interface *interface,
     *stage = "USB data contract";
     if (melodi_usb_contract_validate(&contract))
         return -ENODEV;
-    if (profile == MELODI_USB_CONTRACT_PICO) {
+    if (profile == MELODI_USB_CONTRACT_CDC) {
         *stage = "CDC control contract";
         if (melodi_usb_validate_pico_control(usb))
             return -ENODEV;
-        *bulk_in = MELODI_USB_PICO_IN;
-        *bulk_out = MELODI_USB_PICO_OUT;
+        *bulk_in = MELODI_USB_CDC_IN;
+        *bulk_out = MELODI_USB_CDC_OUT;
     } else {
         *bulk_in = MELODI_USB_TEST_IN;
         *bulk_out = MELODI_USB_TEST_OUT;
@@ -1310,19 +1311,19 @@ static int melodi_usb_allocate_rx(struct melodi_usb_device *device)
 
     if (!device->direct_usb)
         return 0;
-    if (device->profile == MELODI_USB_CONTRACT_PICO) {
+    if (device->profile == MELODI_USB_CONTRACT_CDC) {
         control_endpoint =
             &device->interface->cur_altsetting->endpoint[0].desc;
         device->control_urb = usb_alloc_urb(0, GFP_KERNEL);
         device->control_buffer = usb_alloc_coherent(
-            device->usb, MELODI_USB_PICO_CONTROL_MAX_PACKET, GFP_KERNEL,
+            device->usb, MELODI_USB_CDC_CONTROL_MAX_PACKET, GFP_KERNEL,
             &device->control_dma);
         if (!device->control_urb || !device->control_buffer)
             return -ENOMEM;
         usb_fill_int_urb(
             device->control_urb, device->usb,
-            usb_rcvintpipe(device->usb, MELODI_USB_PICO_CONTROL_IN),
-            device->control_buffer, MELODI_USB_PICO_CONTROL_MAX_PACKET,
+            usb_rcvintpipe(device->usb, MELODI_USB_CDC_CONTROL_IN),
+            device->control_buffer, MELODI_USB_CDC_CONTROL_MAX_PACKET,
             melodi_usb_control_complete, device,
             control_endpoint->bInterval ?: 16);
         device->control_urb->transfer_dma = device->control_dma;
@@ -1366,7 +1367,7 @@ static void melodi_usb_free_rx(struct melodi_usb_device *device)
     usb_free_urb(device->control_urb);
     if (device->control_buffer)
         usb_free_coherent(device->usb,
-                          MELODI_USB_PICO_CONTROL_MAX_PACKET,
+                          MELODI_USB_CDC_CONTROL_MAX_PACKET,
                           device->control_buffer, device->control_dma);
     device->control_urb = NULL;
     device->control_buffer = NULL;
@@ -1432,7 +1433,7 @@ static int melodi_usb_probe(struct usb_interface *interface,
     }
     if (identifier->driver_info == MELODI_USB_PICO_ID) {
         stage = "CDC data interface lookup";
-        data_interface = usb_ifnum_to_if(usb, MELODI_USB_PICO_INTERFACE);
+        data_interface = usb_ifnum_to_if(usb, MELODI_USB_CDC_INTERFACE);
         if (!data_interface || data_interface == interface) {
             error = -ENODEV;
             goto report;
@@ -1441,7 +1442,7 @@ static int melodi_usb_probe(struct usb_interface *interface,
     error = melodi_usb_validate_interface(
         data_interface, identifier->driver_info == MELODI_USB_TEST_ID ?
                             MELODI_USB_CONTRACT_TEST :
-                            MELODI_USB_CONTRACT_PICO,
+                            MELODI_USB_CONTRACT_CDC,
         &bulk_in, &bulk_out, radio_serial, &stage);
     if (error)
         goto report;
@@ -1462,7 +1463,7 @@ static int melodi_usb_probe(struct usb_interface *interface,
     device->bulk_out = bulk_out;
     device->profile = identifier->driver_info == MELODI_USB_TEST_ID ?
                       MELODI_USB_CONTRACT_TEST :
-                      MELODI_USB_CONTRACT_PICO;
+                      MELODI_USB_CONTRACT_CDC;
     device->direct_usb = true;
     stage = "transport allocation";
     error = melodi_usb_state_init(device);
@@ -1676,11 +1677,11 @@ static int melodi_tty_open(struct tty_struct *tty)
         return -ENODEV;
     control_interface = to_usb_interface(parent);
     usb = interface_to_usbdev(control_interface);
-    data_interface = usb_ifnum_to_if(usb, MELODI_USB_PICO_INTERFACE);
+    data_interface = usb_ifnum_to_if(usb, MELODI_USB_CDC_INTERFACE);
     if (!data_interface || data_interface == control_interface)
         return -ENODEV;
     error = melodi_usb_validate_interface(
-        data_interface, MELODI_USB_CONTRACT_PICO, &bulk_in, &bulk_out,
+        data_interface, MELODI_USB_CONTRACT_CDC, &bulk_in, &bulk_out,
         radio_serial, &stage);
     if (error)
         return error;
@@ -1697,7 +1698,7 @@ static int melodi_tty_open(struct tty_struct *tty)
     device->netdev = netdev;
     device->bulk_in = bulk_in;
     device->bulk_out = bulk_out;
-    device->profile = MELODI_USB_CONTRACT_PICO;
+    device->profile = MELODI_USB_CONTRACT_CDC;
     error = melodi_usb_state_init(device);
     if (error)
         goto detach;
