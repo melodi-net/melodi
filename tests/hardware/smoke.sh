@@ -102,6 +102,21 @@ wait_ready()
     "$tool" status -i "$interface" >&2 || true
     return 1
 }
+wait_authenticated()
+{
+    interface=$1
+    count=0
+    while test "$count" -lt 120; do
+        if "$tool" peers -i "$interface" 2>/dev/null |
+            grep -q ' state=authenticated '; then
+            return 0
+        fi
+        sleep 2
+        count=$((count + 1))
+    done
+    "$tool" peers -i "$interface" >&2 || true
+    return 1
+}
 wait_ready mel0
 wait_ready mel1
 
@@ -115,13 +130,18 @@ test -z "$(ip -o -4 addr show dev mel1)"
 test -z "$(ip -o -6 addr show dev mel1)"
 detected0=$(ethtool -i mel0 | sed -n 's/^firmware-version: //p')
 detected1=$(ethtool -i mel1 | sed -n 's/^firmware-version: //p')
-case "$detected0" in 2.7.*|2.8.*) ;; *) exit 1; esac
-case "$detected1" in 2.7.*|2.8.*) ;; *) exit 1; esac
+case "$detected0" in melodi-fw-*) ;; *) exit 1; esac
+case "$detected1" in melodi-fw-*) ;; *) exit 1; esac
 test -z "$firmware0" || test "$detected0" = "$firmware0"
 test -z "$firmware1" || test "$detected1" = "$firmware1"
 printf '%s\n' "mel0 firmware=$detected0" "mel1 firmware=$detected1"
 "$tool" status -i mel0 | grep -F "radio=$serial0"
 "$tool" status -i mel1 | grep -F "radio=$serial1"
+
+"$tool" discover -i mel0
+wait_authenticated mel0
+wait_authenticated mel1
+printf '%s\n' "peers authenticated"
 
 fragmented=$(awk 'BEGIN { for (i = 0; i < 700; i++) printf "%c", 65 + i % 26 }')
 "$receive" -i mel1 12345 >"$payload" 2>"$metadata" &

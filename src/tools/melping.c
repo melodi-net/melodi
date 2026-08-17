@@ -47,7 +47,7 @@ int main(int argc, char **argv)
     descriptor.events = POLLIN;
     descriptor.revents = 0;
     if (!error) {
-        int ready = poll(&descriptor, 1, 10000);
+        int ready = poll(&descriptor, 1, 30000);
 
         error = ready < 0 ? -errno : (ready == 0 ? -ETIMEDOUT : 0);
     }
