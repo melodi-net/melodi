@@ -161,13 +161,14 @@ static void melodi_announce_work(struct work_struct *work)
 
     if (!netif_running(dev) || !netif_carrier_ok(dev))
         return;
-    melodi_discovery_announce(dev);
     mutex_lock(&melodi->lock);
     for (index = 0; index < MELODI_PEER_LIMIT; index++)
         established += melodi->peers[index].session_ready;
     mutex_unlock(&melodi->lock);
-    if (!established)
-        melodi_announce_schedule(melodi, MELODI_ANNOUNCE_RETRY_MS);
+    if (established)
+        return;
+    melodi_discovery_announce(dev);
+    melodi_announce_schedule(melodi, MELODI_ANNOUNCE_RETRY_MS);
 }
 
 void melodi_discovery_init(struct melodi_device *melodi)
@@ -639,10 +640,11 @@ static int melodi_receive_hello(struct net_device *dev, const void *frame,
                melodi_discovery_announce(dev) : 0;
     if (!netif_running(dev) || !netif_carrier_ok(dev))
         return 0;
+    if (established)
+        return 0;
     if (responder)
         return melodi_send_challenge(dev, &hello);
-    if (!established)
-        melodi_discovery_announce_soon(dev);
+    melodi_discovery_announce_soon(dev);
     return 0;
 }
 
