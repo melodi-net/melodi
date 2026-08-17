@@ -35,6 +35,8 @@
 #define MELODI_DISCOVERY_BYTE_LIMIT (MELODI_MESSAGE_MTU * 8)
 #define MELODI_DISCOVERY_TIMEOUT_MS 5000
 #define MELODI_PEER_EXPIRY_MAX_SECONDS 300
+#define MELODI_ANNOUNCE_JITTER_MS 3000
+#define MELODI_ANNOUNCE_RETRY_MS 12000
 #define MELODI_CONTROL_EXPIRY_SECONDS 30
 #define MELODI_RECEIPT_LIMIT 64
 #define MELODI_RECEIPT_TIMEOUT_MS 10000
@@ -354,6 +356,7 @@ struct melodi_device {
     u8 previous_hello_challenge[32];
     struct melodi_peer peers[MELODI_PEER_LIMIT];
     struct delayed_work peer_expiry_work;
+    struct delayed_work announce_work;
     u32 reassembly_bytes;
     bool conflict_pending;
     struct melodi_reassembly reassemblies[MELODI_REASSEMBLY_LIMIT];
@@ -506,6 +509,7 @@ void melodi_netlink_monitor_frame(struct net_device *dev, u8 direction,
 void melodi_stats_read(struct net_device *dev,
                        struct melodi_stats_snapshot *snapshot);
 int melodi_discovery_announce(struct net_device *dev);
+void melodi_discovery_announce_soon(struct net_device *dev);
 int melodi_discovery_probe(struct net_device *dev);
 int melodi_discovery_receive(struct net_device *dev, const void *frame,
                              size_t length,

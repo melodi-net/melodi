@@ -124,15 +124,63 @@ static void melodi_peer_expiry_work(struct work_struct *work)
     melodi_data_state_changed(melodi->netdev);
 }
 
+static void melodi_announce_schedule(struct melodi_device *melodi,
+                                     unsigned int base_ms)
+{
+    unsigned int delay = base_ms +
+        get_random_u32_below(MELODI_ANNOUNCE_JITTER_MS);
+
+    mod_delayed_work(system_wq, &melodi->announce_work,
+                     msecs_to_jiffies(delay));
+}
+
+/**
+ * melodi_discovery_announce_soon - announce after a randomised delay
+ * @dev: ready Melodi interface
+ *
+ * Repeats while no peer session exists. The delay is randomised so peers that
+ * start together do not transmit in the same slot on a half-duplex link.
+ */
+void melodi_discovery_announce_soon(struct net_device *dev)
+{
+    struct melodi_device *melodi;
+
+    if (!melodi_device_is(dev))
+        return;
+    melodi = netdev_priv(dev);
+    melodi_announce_schedule(melodi, 0);
+}
+
+static void melodi_announce_work(struct work_struct *work)
+{
+    struct melodi_device *melodi = container_of(
+        to_delayed_work(work), struct melodi_device, announce_work);
+    struct net_device *dev = melodi->netdev;
+    unsigned int established = 0;
+    unsigned int index;
+
+    if (!netif_running(dev) || !netif_carrier_ok(dev))
+        return;
+    melodi_discovery_announce(dev);
+    mutex_lock(&melodi->lock);
+    for (index = 0; index < MELODI_PEER_LIMIT; index++)
+        established += melodi->peers[index].session_ready;
+    mutex_unlock(&melodi->lock);
+    if (!established)
+        melodi_announce_schedule(melodi, MELODI_ANNOUNCE_RETRY_MS);
+}
+
 void melodi_discovery_init(struct melodi_device *melodi)
 {
     INIT_DELAYED_WORK(&melodi->peer_expiry_work,
                       melodi_peer_expiry_work);
+    INIT_DELAYED_WORK(&melodi->announce_work, melodi_announce_work);
 }
 
 void melodi_discovery_stop(struct melodi_device *melodi)
 {
     cancel_delayed_work_sync(&melodi->peer_expiry_work);
+    cancel_delayed_work_sync(&melodi->announce_work);
 }
 
 void melodi_discovery_reset_locked(struct melodi_device *melodi)
@@ -593,7 +641,9 @@ static int melodi_receive_hello(struct net_device *dev, const void *frame,
         return 0;
     if (responder)
         return melodi_send_challenge(dev, &hello);
-    return established ? 0 : melodi_discovery_announce(dev);
+    if (!established)
+        melodi_discovery_announce_soon(dev);
+    return 0;
 }
 
 static int melodi_auth_validate(struct melodi_device *melodi,

@@ -203,7 +203,7 @@ static int melodi_open(struct net_device *dev)
     netif_tx_start_all_queues(dev);
     if (netif_carrier_ok(dev)) {
         melodi_queue_start(dev);
-        melodi_discovery_announce(dev);
+        melodi_discovery_announce_soon(dev);
     }
     return 0;
 }
@@ -604,7 +604,7 @@ int melodi_device_set_identity(struct net_device *dev,
     if (configure)
         melodi_transport_configure(dev);
     if (announce)
-        melodi_discovery_announce(dev);
+        melodi_discovery_announce_soon(dev);
     return 0;
 }
 
@@ -1091,7 +1091,7 @@ void melodi_link_ready(struct net_device *dev, bool ready,
             melodi_netlink_link_error(dev, -ENETDOWN);
     }
     if (link_ready && netif_running(dev))
-        melodi_discovery_announce(dev);
+        melodi_discovery_announce_soon(dev);
 }
 EXPORT_SYMBOL_GPL(melodi_link_ready);
 
