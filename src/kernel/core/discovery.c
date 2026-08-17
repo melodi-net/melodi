@@ -439,6 +439,8 @@ int melodi_discovery_announce(struct net_device *dev)
     conflict = melodi->conflict_pending;
     hello.expiry_seconds = 300;
     get_random_bytes(hello.challenge, sizeof(hello.challenge));
+    memcpy(melodi->previous_hello_challenge, melodi->last_hello_challenge,
+           sizeof(melodi->previous_hello_challenge));
     memcpy(melodi->last_hello_challenge, hello.challenge,
            sizeof(melodi->last_hello_challenge));
 unlock:
@@ -632,6 +634,7 @@ static int melodi_receive_challenge(struct net_device *dev, const void *frame,
                                     size_t length,
                                     const struct melodi_rx_meta *meta)
 {
+    const u8 *announced;
     struct melodi_device *melodi = netdev_priv(dev);
     struct melodi_wire_auth response = {};
     struct melodi_wire_auth auth;
@@ -660,7 +663,11 @@ static int melodi_receive_challenge(struct net_device *dev, const void *frame,
     if (error)
         goto unlock;
     melodi_peer_observe_locked(peer, meta);
-    if (memcmp(auth.reply_to, melodi->last_hello_challenge, 32)) {
+    if (!memcmp(auth.reply_to, melodi->last_hello_challenge, 32))
+        announced = melodi->last_hello_challenge;
+    else if (!memcmp(auth.reply_to, melodi->previous_hello_challenge, 32))
+        announced = melodi->previous_hello_challenge;
+    else {
         error = -EKEYREJECTED;
         goto unlock;
     }
@@ -671,14 +678,14 @@ static int melodi_receive_challenge(struct net_device *dev, const void *frame,
                        melodi->local_collision_round, peer->collision_round,
                        melodi->identity_generation, peer->generation,
                        ephemeral_public, auth.ephemeral_key,
-                       melodi->last_hello_challenge, auth.challenge, 0);
+                       announced, auth.challenge, 0);
     melodi_session_key(peer->receive_key, shared, melodi->mesh_domain,
                        &melodi->node_id, &peer->node_id,
                        melodi->local_native_locator, peer->native_locator,
                        melodi->local_collision_round, peer->collision_round,
                        melodi->identity_generation, peer->generation,
                        ephemeral_public, auth.ephemeral_key,
-                       melodi->last_hello_challenge, auth.challenge, 1);
+                       announced, auth.challenge, 1);
     melodi_replay_reset(&peer->receive_replay);
     melodi_peer_session_advance(peer);
     peer->session_ready = true;
@@ -693,7 +700,7 @@ static int melodi_receive_challenge(struct net_device *dev, const void *frame,
     response.source_node_id = melodi->node_id;
     response.destination_node_id = peer->node_id;
     memcpy(response.ephemeral_key, ephemeral_public, 32);
-    memcpy(response.challenge, melodi->last_hello_challenge, 32);
+    memcpy(response.challenge, announced, 32);
     memcpy(response.reply_to, auth.challenge, 32);
     memcpy(response.mesh_domain, melodi->mesh_domain, 32);
     response.collision_round = melodi->local_collision_round;

@@ -351,6 +351,7 @@ struct melodi_device {
     u32 identity_generation;
     u64 transmit_counter;
     u8 last_hello_challenge[32];
+    u8 previous_hello_challenge[32];
     struct melodi_peer peers[MELODI_PEER_LIMIT];
     struct delayed_work peer_expiry_work;
     u32 reassembly_bytes;
