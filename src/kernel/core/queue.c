@@ -1093,9 +1093,6 @@ static void melodi_queue_pacing(struct melodi_device *melodi, bool *busy,
         return;
     *busy = info.transmit_pending != 0;
     *guard_ms = info.frame_pace_us / 2000;
-    /* A guard outlasting a control frame would expire it before it is sent. */
-    if (*guard_ms > MELODI_TX_CONTROL_TTL_MS / 2)
-        *guard_ms = MELODI_TX_CONTROL_TTL_MS / 2;
 }
 
 static void melodi_queue_expire_locked(struct melodi_device *melodi,

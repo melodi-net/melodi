@@ -124,21 +124,12 @@ static void melodi_peer_expiry_work(struct work_struct *work)
     melodi_data_state_changed(melodi->netdev);
 }
 
-/* Jitter below one frame time cannot separate two peers on a shared medium. */
 static void melodi_announce_schedule(struct melodi_device *melodi,
                                      unsigned int base_ms)
 {
-    u32 pace_ms = melodi_core_frame_pace_ms(melodi->netdev);
-    unsigned int jitter = MELODI_ANNOUNCE_JITTER_MS;
-    unsigned int delay;
+    unsigned int delay = base_ms +
+        get_random_u32_below(MELODI_ANNOUNCE_JITTER_MS);
 
-    if (pace_ms > jitter && pace_ms <= MELODI_ANNOUNCE_JITTER_MAX_MS)
-        jitter = pace_ms;
-    else if (pace_ms > MELODI_ANNOUNCE_JITTER_MAX_MS)
-        jitter = MELODI_ANNOUNCE_JITTER_MAX_MS;
-    if (base_ms && base_ms < jitter)
-        base_ms = jitter;
-    delay = base_ms + get_random_u32_below(jitter);
     mod_delayed_work(system_wq, &melodi->announce_work,
                      msecs_to_jiffies(delay));
 }
