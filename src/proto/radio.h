@@ -24,7 +24,7 @@ extern "C" {
 
 #define MELODI_RADIO_MAGIC0 0x4d
 #define MELODI_RADIO_MAGIC1 0x4c
-#define MELODI_RADIO_VERSION 1
+#define MELODI_RADIO_VERSION 2
 #define MELODI_RADIO_HEADER_SIZE 8
 #define MELODI_RADIO_PAYLOAD_MAX 512
 #define MELODI_RADIO_PACKET_MAX 240
@@ -117,6 +117,7 @@ struct melodi_radio_status {
     melodi_radio_u16 queue_depth;
     melodi_radio_u8 state;
     melodi_radio_u8 fault;
+    melodi_radio_u8 modem_status;
 };
 
 struct melodi_radio_transmit {

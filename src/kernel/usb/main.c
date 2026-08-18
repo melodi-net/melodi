@@ -147,6 +147,7 @@ struct melodi_usb_device {
     u8 bulk_out;
     u8 profile;
     u8 fault;
+    u8 modem_status;
     bool disconnected;
     bool suspended;
     bool ready;
@@ -1074,6 +1075,7 @@ static void melodi_usb_handle_status(struct melodi_usb_device *device,
     }
     mutex_lock(&device->state_lock);
     device->fault = status->fault;
+    device->modem_status = status->modem_status;
     if (status->state == MELODI_RADIO_STATE_READY && device->identified &&
         status->locator && status->locator == device->assigned_locator &&
         !device->ready && !device->failed) {
@@ -2042,6 +2044,36 @@ static int melodi_tty_release_all_set(const char *value,
     melodi_tty_release_each();
     return 0;
 }
+
+static int melodi_modem_status_get(char *buffer,
+                                   const struct kernel_param *parameter)
+{
+    unsigned int index;
+    int length = 0;
+
+    (void)parameter;
+    mutex_lock(&melodi_tty_lock);
+    for (index = 0; index < MELODI_TTY_LIMIT; index++) {
+        struct melodi_usb_device *device;
+
+        if (!melodi_ttys[index] || !melodi_ttys[index]->disc_data)
+            continue;
+        device = melodi_ttys[index]->disc_data;
+        length += scnprintf(buffer + length, PAGE_SIZE - length,
+                            "%s=0x%02x ",
+                            device->netdev ? device->netdev->name : "?",
+                            READ_ONCE(device->modem_status));
+    }
+    mutex_unlock(&melodi_tty_lock);
+    length += scnprintf(buffer + length, PAGE_SIZE - length, "\n");
+    return length;
+}
+
+static const struct kernel_param_ops melodi_modem_status_ops = {
+    .get = melodi_modem_status_get,
+};
+
+module_param_cb(modem_status, &melodi_modem_status_ops, NULL, 0444);
 
 static const struct kernel_param_ops melodi_tty_attach_ops = {
     .set = melodi_tty_attach_set,

@@ -11,7 +11,7 @@
 
 #define MELODI_RADIO_CONFIGURE_SIZE 48
 #define MELODI_RADIO_INFO_SIZE 72
-#define MELODI_RADIO_STATUS_SIZE 10
+#define MELODI_RADIO_STATUS_SIZE 11
 #define MELODI_RADIO_TRANSMIT_SIZE 10
 #define MELODI_RADIO_RECEIVE_SIZE 16
 #define MELODI_RADIO_RESULT_SIZE 10
@@ -306,6 +306,7 @@ int melodi_radio_encode_status(const struct melodi_radio_status *status,
     melodi_radio_put_u16(payload + 6, status->queue_depth);
     payload[8] = status->state;
     payload[9] = status->fault;
+    payload[10] = status->modem_status;
     return melodi_radio_stream_encode(MELODI_RADIO_T_STATUS, payload,
                                       sizeof(payload), output, capacity,
                                       encoded_length);
@@ -324,6 +325,7 @@ int melodi_radio_decode_status(const void *input, size_t length,
     status->queue_depth = melodi_radio_get_u16(payload + 6);
     status->state = payload[8];
     status->fault = payload[9];
+    status->modem_status = payload[10];
     if (status->state > MELODI_RADIO_STATE_FAILED ||
         status->fault > MELODI_RADIO_FAULT_INTERNAL ||
         status->queue_free > status->queue_depth)
