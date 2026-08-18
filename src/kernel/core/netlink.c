@@ -139,6 +139,7 @@ static const struct nla_policy melodi_policy[MELODI_A_MAX + 1] = {
     [MELODI_A_PEER_POLICY] =
         NLA_POLICY_MAX(NLA_U8, MELODI_PEER_POLICY_BLOCKED),
     [MELODI_A_POLICY_RESET] = NLA_POLICY_RANGE(NLA_U8, 1, 1),
+    [MELODI_A_FRAME_PACE_US] = { .type = NLA_U32 },
 };
 
 static u64 melodi_allowed_attributes(u8 command)
@@ -625,6 +626,7 @@ static int melodi_link_get(struct sk_buff *skb, struct genl_info *info)
     char radio_serial[MELODI_RADIO_SERIAL_MAX + 1];
     char bus_info[MELODI_BUS_INFO_MAX + 1] = {};
     struct melodi_link_info link;
+    u32 frame_pace_us = 0;
     int link_error;
     void *header;
 
@@ -641,8 +643,10 @@ static int melodi_link_get(struct sk_buff *skb, struct genl_info *info)
     link_error = melodi->link_error;
     strscpy(radio_serial, melodi->radio_serial, sizeof(radio_serial));
     mutex_unlock(&melodi->lock);
-    if (!melodi_core_link_info(dev, &link))
+    if (!melodi_core_link_info(dev, &link)) {
         strscpy(bus_info, link.bus_info, sizeof(bus_info));
+        frame_pace_us = link.frame_pace_us;
+    }
     dev_put(dev);
     reply = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
     if (!reply)
@@ -658,7 +662,9 @@ static int melodi_link_get(struct sk_buff *skb, struct genl_info *info)
         nla_put_s32(reply, MELODI_A_LINK_ERROR, link_error) ||
         (radio_serial[0] &&
          nla_put_string(reply, MELODI_A_RADIO_SERIAL, radio_serial)) ||
-        (bus_info[0] && nla_put_string(reply, MELODI_A_BUS_INFO, bus_info))) {
+        (bus_info[0] && nla_put_string(reply, MELODI_A_BUS_INFO, bus_info)) ||
+        (frame_pace_us &&
+         nla_put_u32(reply, MELODI_A_FRAME_PACE_US, frame_pace_us))) {
         nlmsg_free(reply);
         return -EMSGSIZE;
     }

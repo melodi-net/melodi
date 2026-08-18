@@ -93,6 +93,7 @@ enum melodi_attribute {
     MELODI_A_PEER_LAST_SEEN_NS,
     MELODI_A_PEER_POLICY,
     MELODI_A_POLICY_RESET,
+    MELODI_A_FRAME_PACE_US,
     __MELODI_A_MAX,
 };
 

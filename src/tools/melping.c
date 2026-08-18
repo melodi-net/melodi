@@ -3,6 +3,8 @@
 #include "client.h"
 
 #include <errno.h>
+#include <linux/genetlink.h>
+#include <linux/netlink.h>
 #include <net/if.h>
 #include <poll.h>
 #include <stdbool.h>
@@ -13,6 +15,8 @@
 
 #define MELODI_PING_ATTEMPTS 3
 #define MELODI_PING_TIMEOUT_MS 10000
+#define MELODI_PING_TIMEOUT_MAX_MS 120000
+#define MELODI_PING_ROUND_TRIPS 3
 
 static long long melodi_ping_now_us(void)
 {
@@ -23,6 +27,47 @@ static long long melodi_ping_now_us(void)
     return (long long)now.tv_sec * 1000000LL + now.tv_nsec / 1000;
 }
 
+/* A probe outlives several link round trips, however slow the link. */
+static int melodi_ping_timeout(struct melodi_socket *socket_state,
+                               uint32_t ifindex, unsigned int *timeout_ms)
+{
+    uint8_t attributes_buffer[64];
+    uint8_t reply_buffer[4096];
+    struct melodi_genl_builder attributes;
+    struct melodi_genl_message reply;
+    unsigned long long scaled;
+    uint32_t pace_us = 0;
+    int error;
+
+    *timeout_ms = MELODI_PING_TIMEOUT_MS;
+    error = melodi_genl_begin(&attributes, attributes_buffer,
+                              sizeof(attributes_buffer), socket_state->family,
+                              0, 0, socket_state->portid,
+                              MELODI_CMD_LINK_GET);
+    if (!error)
+        error = melodi_genl_put_u32(&attributes, MELODI_A_IFINDEX, ifindex);
+    if (error)
+        return error;
+    error = melodi_socket_command(
+        socket_state, MELODI_CMD_LINK_GET,
+        attributes.data + NLMSG_HDRLEN + GENL_HDRLEN,
+        attributes.length - NLMSG_HDRLEN - GENL_HDRLEN, true, &reply,
+        reply_buffer, sizeof(reply_buffer));
+    if (error)
+        return error;
+    if (!reply.attributes[MELODI_A_FRAME_PACE_US] ||
+        reply.lengths[MELODI_A_FRAME_PACE_US] != sizeof(pace_us))
+        return 0;
+    memcpy(&pace_us, reply.attributes[MELODI_A_FRAME_PACE_US],
+           sizeof(pace_us));
+    scaled = (unsigned long long)pace_us / 1000 * MELODI_PING_ROUND_TRIPS;
+    if (scaled > MELODI_PING_TIMEOUT_MAX_MS)
+        scaled = MELODI_PING_TIMEOUT_MAX_MS;
+    if (scaled > *timeout_ms)
+        *timeout_ms = (unsigned int)scaled;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     uint8_t receive_buffer[MELODI_MESSAGE_MTU + 512];
@@ -30,6 +75,7 @@ int main(int argc, char **argv)
     struct melodi_node_id destination;
     struct melodi_socket socket_state = { .descriptor = -1 };
     struct pollfd descriptor;
+    unsigned int timeout_ms = MELODI_PING_TIMEOUT_MS;
     long long started;
     long long finished = 0;
     uint64_t nonce;
@@ -53,6 +99,8 @@ int main(int argc, char **argv)
     if (!error)
         error = melodi_socket_open(&socket_state);
     if (!error)
+        error = melodi_ping_timeout(&socket_state, ifindex, &timeout_ms);
+    if (!error)
         error = melodi_client_bind(&socket_state, ifindex, 49153);
     descriptor.fd = socket_state.descriptor;
     descriptor.events = POLLIN;
@@ -72,7 +120,7 @@ int main(int argc, char **argv)
             error = -errno;
             break;
         }
-        deadline += (long long)MELODI_PING_TIMEOUT_MS * 1000LL;
+        deadline += (long long)timeout_ms * 1000LL;
         while (!error && !replied) {
             long long remaining = melodi_ping_now_us();
             int ready;

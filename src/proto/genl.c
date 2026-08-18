@@ -30,6 +30,7 @@ static int melodi_attribute_width(uint16_t type, uint16_t length)
     case MELODI_A_LINK_ERROR:
     case MELODI_A_PEER_EXPIRY_MS:
     case MELODI_A_PEER_CAPABILITIES:
+    case MELODI_A_FRAME_PACE_US:
         return length == sizeof(uint32_t);
     case MELODI_A_LOCAL_SERVICE:
     case MELODI_A_DEST_SERVICE:
@@ -229,7 +230,8 @@ static int melodi_validate_schema(const struct melodi_genl_message *message)
         if ((present & allowed) != allowed ||
             present & ~(allowed |
                         (UINT64_C(1) << MELODI_A_RADIO_SERIAL) |
-                        (UINT64_C(1) << MELODI_A_BUS_INFO)))
+                        (UINT64_C(1) << MELODI_A_BUS_INFO) |
+                        (UINT64_C(1) << MELODI_A_FRAME_PACE_US)))
             return -EINVAL;
         return melodi_has(message, MELODI_A_BUS_INFO) ?
                melodi_validate_bus_info(message) : 0;
