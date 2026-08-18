@@ -588,6 +588,7 @@ static int melodi_receive_hello(struct net_device *dev, const void *frame,
     struct melodi_wire_hello hello;
     struct melodi_peer *peer;
     bool conflicted = false;
+    bool stale = false;
     bool local_changed = false;
     bool local_collision = false;
     bool responder = false;
@@ -624,12 +625,22 @@ static int melodi_receive_hello(struct net_device *dev, const void *frame,
         melodi_peer_observe_locked(peer, meta);
         conflicted = peer->conflicted;
         responder = melodi_responder_locked(melodi, &peer->node_id);
+        /* Drops a session the announcing peer no longer shares. */
         established = peer->session_ready;
+        if (established) {
+            melodi_peer_session_reset_locked(melodi, peer);
+            established = false;
+            stale = true;
+        }
         melodi_peer_expiry_schedule_locked(melodi);
     }
     mutex_unlock(&melodi->lock);
     if (error)
         return error;
+    if (stale) {
+        melodi_queue_state_changed(dev);
+        melodi_data_state_changed(dev);
+    }
     if (local_changed) {
         melodi_link_ready(dev, false, 0);
         melodi_data_fail_pending(dev, -EADDRINUSE);
@@ -639,8 +650,6 @@ static int melodi_receive_hello(struct net_device *dev, const void *frame,
         return local_collision && netif_running(dev) && netif_carrier_ok(dev) ?
                melodi_discovery_announce(dev) : 0;
     if (!netif_running(dev) || !netif_carrier_ok(dev))
-        return 0;
-    if (established)
         return 0;
     if (responder)
         return melodi_send_challenge(dev, &hello);
