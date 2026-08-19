@@ -124,14 +124,39 @@ static void melodi_peer_expiry_work(struct work_struct *work)
     melodi_data_state_changed(melodi->netdev);
 }
 
+/*
+ * Each identity owns a fixed lane in the announce cycle, so two peers transmit
+ * at different times by construction instead of by luck. The lane is at least
+ * one frame wide, and it also lengthens the cycle, so peers sharing a lane
+ * drift apart instead of colliding on every cycle.
+ */
 static void melodi_announce_schedule(struct melodi_device *melodi,
                                      unsigned int base_ms)
 {
-    unsigned int delay = base_ms +
-        get_random_u32_below(MELODI_ANNOUNCE_JITTER_MS);
+    u32 pace_ms = melodi_core_frame_pace_ms(melodi->netdev);
+    unsigned int lane = MELODI_ANNOUNCE_JITTER_MS;
+    unsigned int slot = 0;
+    unsigned int index;
+    unsigned int delay;
 
+    for (index = 0; index < MELODI_NODE_ID_SIZE; index++)
+        slot += melodi->node_id.bytes[index];
+    slot %= MELODI_ANNOUNCE_SLOTS;
+    if (pace_ms > lane)
+        lane = pace_ms;
+    delay = base_ms + slot * lane + get_random_u32_below(lane);
     mod_delayed_work(system_wq, &melodi->announce_work,
                      msecs_to_jiffies(delay));
+}
+
+static unsigned int melodi_announce_period(struct melodi_device *melodi)
+{
+    u32 pace_ms = melodi_core_frame_pace_ms(melodi->netdev);
+    unsigned int lane = MELODI_ANNOUNCE_JITTER_MS;
+
+    if (pace_ms > lane)
+        lane = pace_ms;
+    return MELODI_ANNOUNCE_SLOTS * lane;
 }
 
 /**
@@ -168,7 +193,7 @@ static void melodi_announce_work(struct work_struct *work)
     if (established)
         return;
     melodi_discovery_announce(dev);
-    melodi_announce_schedule(melodi, MELODI_ANNOUNCE_RETRY_MS);
+    melodi_announce_schedule(melodi, melodi_announce_period(melodi));
 }
 
 void melodi_discovery_init(struct melodi_device *melodi)
