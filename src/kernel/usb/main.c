@@ -162,6 +162,22 @@ struct melodi_usb_device {
 static DEFINE_MUTEX(melodi_tty_lock);
 static struct tty_struct *melodi_ttys[MELODI_TTY_LIMIT];
 static struct work_struct melodi_tty_reap_work;
+#define MELODI_USB_HOTPLUG_DELAY_MS 200
+#define MELODI_USB_HOTPLUG_TRIES 25
+
+struct melodi_usb_hotplug {
+    struct delayed_work work;
+    struct usb_device *usb;
+    unsigned int attempts;
+};
+
+static struct workqueue_struct *melodi_hotplug_queue;
+static bool melodi_hotplug_stopping;
+static bool melodi_autoprobe = true;
+module_param_named(autoprobe, melodi_autoprobe, bool, 0644);
+MODULE_PARM_DESC(autoprobe,
+                 "attach radios as they appear on the USB bus");
+
 static bool melodi_tty_ready;
 
 static int melodi_usb_next_id(atomic_t *counter)
@@ -2012,6 +2028,105 @@ static void melodi_tty_release_all(void)
     melodi_tty_release_each();
 }
 
+/*
+ * A radio enumerates as CDC, so cdc_acm owns the port and the line discipline
+ * has to be attached from outside it. Watching the USB bus finds the port the
+ * moment cdc_acm publishes it, which removes the need for a udev rule.
+ */
+static int melodi_hotplug_tty(struct device *dev, void *data)
+{
+    dev_t *number = data;
+
+    if (!dev->devt || strncmp(dev_name(dev), "tty", 3))
+        return 0;
+    *number = dev->devt;
+    return 1;
+}
+
+static dev_t melodi_hotplug_find(struct usb_device *usb)
+{
+    dev_t number = 0;
+    unsigned int index;
+
+    if (!usb->actconfig)
+        return 0;
+    for (index = 0; index < usb->actconfig->desc.bNumInterfaces; index++) {
+        struct usb_interface *interface = usb->actconfig->interface[index];
+
+        if (interface &&
+            device_for_each_child(&interface->dev, &number,
+                                  melodi_hotplug_tty))
+            return number;
+    }
+    return 0;
+}
+
+static bool melodi_hotplug_match(struct usb_device *usb)
+{
+    u16 vendor = le16_to_cpu(usb->descriptor.idVendor);
+    u16 product = le16_to_cpu(usb->descriptor.idProduct);
+
+    return (vendor == MELODI_USB_PICO_VENDOR &&
+            product == MELODI_USB_PICO_PRODUCT) ||
+           (vendor == MELODI_USB_FEATHER_VENDOR &&
+            product == MELODI_USB_FEATHER_PRODUCT);
+}
+
+static void melodi_hotplug_work(struct work_struct *work)
+{
+    struct melodi_usb_hotplug *hotplug = container_of(
+        to_delayed_work(work), struct melodi_usb_hotplug, work);
+    dev_t number = melodi_hotplug_find(hotplug->usb);
+
+    if (!number && !READ_ONCE(melodi_hotplug_stopping) &&
+        ++hotplug->attempts < MELODI_USB_HOTPLUG_TRIES) {
+        queue_delayed_work(melodi_hotplug_queue, &hotplug->work,
+                           msecs_to_jiffies(MELODI_USB_HOTPLUG_DELAY_MS));
+        return;
+    }
+    if (number)
+        melodi_tty_attach_device(number);
+    usb_put_dev(hotplug->usb);
+    kfree(hotplug);
+}
+
+static int melodi_usb_notify(struct notifier_block *block,
+                             unsigned long action, void *data)
+{
+    struct melodi_usb_hotplug *hotplug;
+    struct usb_device *usb = data;
+
+    (void)block;
+    if (action != USB_DEVICE_ADD || !melodi_autoprobe || !usb ||
+        !melodi_hotplug_match(usb) || READ_ONCE(melodi_hotplug_stopping))
+        return NOTIFY_DONE;
+    hotplug = kzalloc(sizeof(*hotplug), GFP_KERNEL);
+    if (!hotplug)
+        return NOTIFY_DONE;
+    hotplug->usb = usb_get_dev(usb);
+    INIT_DELAYED_WORK(&hotplug->work, melodi_hotplug_work);
+    queue_delayed_work(melodi_hotplug_queue, &hotplug->work,
+                       msecs_to_jiffies(MELODI_USB_HOTPLUG_DELAY_MS));
+    return NOTIFY_DONE;
+}
+
+static struct notifier_block melodi_usb_notifier = {
+    .notifier_call = melodi_usb_notify,
+};
+
+static int melodi_hotplug_existing(struct usb_device *usb, void *data)
+{
+    (void)data;
+    if (melodi_hotplug_match(usb))
+        melodi_usb_notify(NULL, USB_DEVICE_ADD, usb);
+    return 0;
+}
+
+static void melodi_hotplug_seed(void)
+{
+    usb_for_each_dev(NULL, melodi_hotplug_existing);
+}
+
 static int melodi_tty_attach_set(const char *value,
                                  const struct kernel_param *parameter)
 {
@@ -2145,11 +2260,22 @@ static int __init melodi_usb_init(void)
     mutex_lock(&melodi_tty_lock);
     melodi_tty_ready = true;
     mutex_unlock(&melodi_tty_lock);
+    melodi_hotplug_queue = alloc_ordered_workqueue("melodi_hotplug", 0);
+    if (melodi_hotplug_queue) {
+        usb_register_notify(&melodi_usb_notifier);
+        melodi_hotplug_seed();
+    }
     return 0;
 }
 
 static void __exit melodi_usb_exit(void)
 {
+    if (melodi_hotplug_queue) {
+        WRITE_ONCE(melodi_hotplug_stopping, true);
+        usb_unregister_notify(&melodi_usb_notifier);
+        destroy_workqueue(melodi_hotplug_queue);
+        melodi_hotplug_queue = NULL;
+    }
     cancel_work_sync(&melodi_tty_reap_work);
     melodi_tty_release_all();
     usb_deregister(&melodi_usb_driver);
