@@ -116,16 +116,36 @@ melodi/
 └── firmware/   the radio firmware
 ```
 
-The host owns all radio parameters. `melodi_usb` module parameters set them:
+The host owns all radio parameters. One `profile` picks a legal combination, so
+frequency, duty budget and power cannot be set to a mix that no regulator
+allows:
+
+```
+profile=139
+        │││
+        ││└─ power   0 lowest to 9 highest, capped by the region
+        │└── rate    0 is SF12 for reach, 5 is SF7 for speed
+        └─── region  0 EU868 1%, 1 EU868 10%, 2 US915, 3 AS923
+```
+
+The default `139` selects the ten percent EU868 sub-band centred on
+869.525 MHz, SF9, and the highest power the region permits. Regions 2 and 3 are
+starting points and want checking against local rules before use; US915 in
+particular is a hopping and dwell-time regime rather than a duty-cycle one.
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `frequency` | 868100000 | carrier in hertz |
+| `profile` | 139 | region, rate and power as three digits |
+| `frequency` | 0 | carrier in hertz, 0 takes the profile |
 | `bandwidth` | 125 | channel bandwidth in kilohertz |
-| `spreading` | 9 | spreading factor, 6 to 12 |
+| `spreading` | 0 | spreading factor 6 to 12, 0 takes the profile |
 | `coding` | 5 | coding rate denominator, 5 to 8 |
-| `power` | 14 | transmit power in dBm |
-| `duty` | 100 | duty budget in permille |
+| `power` | -1 | transmit power in dBm, negative takes the profile |
+| `duty` | 0 | duty budget in permille, 0 takes the profile |
+| `autoprobe` | 1 | claim radios as they appear on the USB bus |
+
+An individual parameter overrides the profile, so `profile=139 spreading=11`
+keeps the region and power while forcing a slower rate.
 
 ## Status
 

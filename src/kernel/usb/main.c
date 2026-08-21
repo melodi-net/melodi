@@ -43,21 +43,98 @@
 static bool allow_test_device;
 module_param(allow_test_device, bool, 0600);
 
-static unsigned int radio_frequency_hz = 868100000;
+static unsigned int radio_profile = 139;
+static unsigned int radio_frequency_hz;
 static unsigned int radio_bandwidth_khz = 125;
-static unsigned int radio_spreading_factor = 9;
+static unsigned int radio_spreading_factor;
 static unsigned int radio_coding_rate = 5;
-static int radio_transmit_power_dbm = 14;
-static unsigned int radio_duty_permille = 10;
+static int radio_transmit_power_dbm = -1;
+static unsigned int radio_duty_permille;
+module_param_named(profile, radio_profile, uint, 0644);
 module_param_named(frequency, radio_frequency_hz, uint, 0644);
 module_param_named(bandwidth, radio_bandwidth_khz, uint, 0644);
 module_param_named(spreading, radio_spreading_factor, uint, 0644);
 module_param_named(coding, radio_coding_rate, uint, 0644);
 module_param_named(power, radio_transmit_power_dbm, int, 0644);
 module_param_named(duty, radio_duty_permille, uint, 0644);
-MODULE_PARM_DESC(duty,
-                 "transmit duty budget in permille, default 10 for the one "
-                 "percent EU868 sub-band holding the default frequency");
+MODULE_PARM_DESC(profile,
+                 "three digits, region then rate then power. Region 0 EU868 "
+                 "one percent, 1 EU868 ten percent, 2 US915, 3 AS923. Rate 0 "
+                 "slowest to 5 fastest. Power 0 lowest to 9 highest, capped "
+                 "by the region. Verify the region against local rules");
+MODULE_PARM_DESC(frequency, "centre frequency in hertz, 0 takes the profile");
+MODULE_PARM_DESC(duty, "duty budget in permille, 0 takes the profile");
+MODULE_PARM_DESC(power, "transmit power in dBm, negative takes the profile");
+MODULE_PARM_DESC(spreading, "spreading factor, 0 takes the profile");
+
+struct melodi_radio_region {
+    u32 frequency_hz;
+    u16 duty_permille;
+    s16 power_max_dbm;
+};
+
+/* Indexed by the hundreds digit of the profile. */
+static const struct melodi_radio_region melodi_radio_regions[] = {
+    { 868100000,   10, 14 },
+    { 869525000,  100, 20 },
+    { 903900000, 1000, 20 },
+    { 923200000,   10, 16 },
+};
+
+/* Indexed by the tens digit of the profile, ascending data rate. */
+static const u8 melodi_radio_rates[] = { 12, 11, 10, 9, 8, 7 };
+
+static unsigned int melodi_radio_digit(unsigned int place)
+{
+    unsigned int value = radio_profile;
+
+    while (place--)
+        value /= 10;
+    return value % 10;
+}
+
+static const struct melodi_radio_region *melodi_radio_region(void)
+{
+    unsigned int index = melodi_radio_digit(2);
+
+    if (index >= ARRAY_SIZE(melodi_radio_regions))
+        index = 1;
+    return &melodi_radio_regions[index];
+}
+
+static u32 melodi_radio_frequency(void)
+{
+    return radio_frequency_hz ? radio_frequency_hz :
+                                melodi_radio_region()->frequency_hz;
+}
+
+static u16 melodi_radio_duty(void)
+{
+    return radio_duty_permille ? (u16)radio_duty_permille :
+                                 melodi_radio_region()->duty_permille;
+}
+
+static u8 melodi_radio_spreading(void)
+{
+    unsigned int index = melodi_radio_digit(1);
+
+    if (radio_spreading_factor)
+        return (u8)radio_spreading_factor;
+    if (index >= ARRAY_SIZE(melodi_radio_rates))
+        index = 3;
+    return melodi_radio_rates[index];
+}
+
+static s16 melodi_radio_power(void)
+{
+    s16 ceiling = melodi_radio_region()->power_max_dbm;
+    int power = radio_transmit_power_dbm;
+
+    if (power < 0)
+        power = 2 + 2 * (int)melodi_radio_digit(0);
+    return power > ceiling ? ceiling : (s16)power;
+}
+
 
 struct melodi_usb_device;
 static struct usb_driver melodi_usb_driver;
@@ -664,7 +741,7 @@ static void melodi_usb_get_info(struct net_device *netdev,
     }
     if (packet_mtu > MELODI_RADIO_SEGMENT_SIZE &&
         !melodi_radio_airtime_estimate(
-            (u8)radio_spreading_factor, (u16)radio_bandwidth_khz,
+            melodi_radio_spreading(), (u16)radio_bandwidth_khz,
             (u8)radio_coding_rate, packet_mtu, &packet_us))
         info->frame_pace_us = packet_us * 2;
     if (device)
@@ -705,7 +782,7 @@ static int melodi_usb_airtime(struct net_device *netdev,
     if (!segments || segments > MELODI_RADIO_SEGMENT_LIMIT)
         return -EMSGSIZE;
     error = melodi_radio_airtime_estimate(
-        (u8)radio_spreading_factor, (u16)radio_bandwidth_khz,
+        melodi_radio_spreading(), (u16)radio_bandwidth_khz,
         (u8)radio_coding_rate, packet_mtu, &packet_us);
     if (error)
         return error;
@@ -713,12 +790,12 @@ static int melodi_usb_airtime(struct net_device *netdev,
     remainder = frame->len - (segments - 1) * payload_mtu +
                 MELODI_RADIO_SEGMENT_SIZE;
     error = melodi_radio_airtime_estimate(
-        (u8)radio_spreading_factor, (u16)radio_bandwidth_khz,
+        melodi_radio_spreading(), (u16)radio_bandwidth_khz,
         (u8)radio_coding_rate, (u16)remainder, &packet_us);
     if (error)
         return error;
     charge->duration_us += packet_us;
-    charge->budget_us = MELODI_AIRTIME_WINDOW_US * radio_duty_permille / 1000;
+    charge->budget_us = MELODI_AIRTIME_WINDOW_US * melodi_radio_duty() / 1000;
     charge->broadcast_budget_us = charge->budget_us / 10;
     return 0;
 }
@@ -1034,12 +1111,12 @@ static int melodi_usb_send_configure(struct melodi_usb_device *device)
            sizeof(config.domain));
     config.locator = device->assigned_locator;
     mutex_unlock(&device->state_lock);
-    config.frequency_hz = radio_frequency_hz;
+    config.frequency_hz = melodi_radio_frequency();
     config.bandwidth_khz = (u16)radio_bandwidth_khz;
-    config.spreading_factor = (u8)radio_spreading_factor;
+    config.spreading_factor = melodi_radio_spreading();
     config.coding_rate = (u8)radio_coding_rate;
-    config.transmit_power_dbm = (s16)radio_transmit_power_dbm;
-    config.duty_permille = (u16)radio_duty_permille;
+    config.transmit_power_dbm = melodi_radio_power();
+    config.duty_permille = melodi_radio_duty();
     error = melodi_radio_encode_configure(&config, message, sizeof(message),
                                           &length);
     if (error)
