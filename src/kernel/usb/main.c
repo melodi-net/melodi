@@ -48,13 +48,16 @@ static unsigned int radio_bandwidth_khz = 125;
 static unsigned int radio_spreading_factor = 9;
 static unsigned int radio_coding_rate = 5;
 static int radio_transmit_power_dbm = 14;
-static unsigned int radio_duty_permille = 100;
+static unsigned int radio_duty_permille = 10;
 module_param_named(frequency, radio_frequency_hz, uint, 0644);
 module_param_named(bandwidth, radio_bandwidth_khz, uint, 0644);
 module_param_named(spreading, radio_spreading_factor, uint, 0644);
 module_param_named(coding, radio_coding_rate, uint, 0644);
 module_param_named(power, radio_transmit_power_dbm, int, 0644);
 module_param_named(duty, radio_duty_permille, uint, 0644);
+MODULE_PARM_DESC(duty,
+                 "transmit duty budget in permille, default 10 for the one "
+                 "percent EU868 sub-band holding the default frequency");
 
 struct melodi_usb_device;
 static struct usb_driver melodi_usb_driver;
