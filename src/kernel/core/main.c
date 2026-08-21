@@ -900,6 +900,33 @@ struct net_device *melodi_attach_selected_transport(
 }
 EXPORT_SYMBOL_GPL(melodi_attach_selected_transport);
 
+/* Binds a radio to its pinned interface, or to a fresh one when unpinned. */
+struct net_device *melodi_attach_radio_transport(
+    struct device *parent, const char *radio_serial,
+    size_t driver_private_size, const struct melodi_link_ops *ops,
+    struct module *owner)
+{
+    struct melodi_device *melodi;
+    struct net_device *dev;
+
+    dev = melodi_attach_selected_transport(parent, radio_serial,
+                                           driver_private_size, ops, owner);
+    if (!IS_ERR(dev) || PTR_ERR(dev) != -ENODEV)
+        return dev;
+    if (!melodi_radio_serial_valid(radio_serial))
+        return ERR_PTR(-EINVAL);
+    dev = melodi_attach_transport(parent, driver_private_size, ops, owner);
+    if (IS_ERR(dev))
+        return dev;
+    melodi = netdev_priv(dev);
+    mutex_lock(&melodi->lock);
+    strscpy(melodi->radio_serial, radio_serial,
+            sizeof(melodi->radio_serial));
+    mutex_unlock(&melodi->lock);
+    return dev;
+}
+EXPORT_SYMBOL_GPL(melodi_attach_radio_transport);
+
 /**
  * melodi_link_attach - bind transport operations to an rtnl-created device
  * @dev: device allocated with melodi_link_setup() and already registered

@@ -89,6 +89,10 @@ struct net_device *melodi_attach_transport(struct device *parent,
                                            size_t driver_private_size,
                                            const struct melodi_link_ops *ops,
                                            struct module *owner);
+struct net_device *melodi_attach_radio_transport(
+    struct device *parent, const char *radio_serial,
+    size_t driver_private_size, const struct melodi_link_ops *ops,
+    struct module *owner);
 struct net_device *melodi_attach_selected_transport(
     struct device *parent, const char *radio_serial,
     size_t driver_private_size, const struct melodi_link_ops *ops,

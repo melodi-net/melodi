@@ -1508,7 +1508,7 @@ static int melodi_usb_probe(struct usb_interface *interface,
     if (error)
         goto report;
     stage = "transport selection";
-    netdev = melodi_attach_selected_transport(
+    netdev = melodi_attach_radio_transport(
         &interface->dev, radio_serial, sizeof(*device),
         &melodi_usb_link_ops, THIS_MODULE);
     if (IS_ERR(netdev)) {
@@ -1746,7 +1746,7 @@ static int melodi_tty_open(struct tty_struct *tty)
         radio_serial, &stage);
     if (error)
         return error;
-    netdev = melodi_attach_selected_transport(
+    netdev = melodi_attach_radio_transport(
         tty->dev, radio_serial, sizeof(*device), &melodi_usb_link_ops,
         THIS_MODULE);
     if (IS_ERR(netdev))
